@@ -94,11 +94,14 @@ SerializeMessages(const std::vector<quantclaw::Message>& messages) {
   return arr;
 }
 
-// Translate QuantClaw tool definitions → OpenAI function-calling schema.
+// Pass through tool definitions — agent_loop already builds the OpenAI
+// function-calling shape {type: "function", function: {name, description,
+// parameters}}. Wrapping again here produced a double-nested payload that
+// llama-server rejects with "key 'name' not found".
 nlohmann::json ConvertTools(const std::vector<nlohmann::json>& qc_tools) {
   nlohmann::json out = nlohmann::json::array();
   for (const auto& t : qc_tools) {
-    out.push_back({{"type", "function"}, {"function", t}});
+    out.push_back(t);
   }
   return out;
 }
@@ -221,7 +224,10 @@ struct StreamContext {
         return;
       }
 
-      if (choice.value("finish_reason", std::string{}) == "tool_calls") {
+      if (choice.contains("finish_reason") &&
+          !choice["finish_reason"].is_null() &&
+          choice["finish_reason"].is_string() &&
+          choice["finish_reason"].get<std::string>() == "tool_calls") {
         flush_tool_calls();
         return;
       }
