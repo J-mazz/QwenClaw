@@ -83,6 +83,22 @@ static std::string generate_id(const std::string& prefix = "bg") {
   return ss.str();
 }
 
+// POSIX shell single-quoting: wraps the value in single quotes and escapes
+// embedded single quotes, so it is always passed as one literal argument.
+static std::string shell_quote(const std::string& s) {
+  std::string out;
+  out.reserve(s.size() + 2);
+  out += '\'';
+  for (char c : s) {
+    if (c == '\'')
+      out += "'\\''";
+    else
+      out += c;
+  }
+  out += '\'';
+  return out;
+}
+
 // ---------------------------------------------------------------------------
 // Constructor
 // ---------------------------------------------------------------------------
@@ -306,9 +322,10 @@ void ToolRegistry::RegisterReconTools() {
           int timeout = params.value("timeout", 120);
           std::string cmd;
           if (has_binary("subfinder")) {
-            cmd = "subfinder -d " + target + " -silent 2>/dev/null";
+            cmd = "subfinder -d " + shell_quote(target) + " -silent 2>/dev/null";
           } else {
-            cmd = "amass enum -passive -d " + target + " 2>/dev/null";
+            cmd = "amass enum -passive -d " + shell_quote(target) +
+                  " 2>/dev/null";
           }
           auto result = run_recon_cmd(cmd, timeout);
           return result.dump();
@@ -342,14 +359,14 @@ void ToolRegistry::RegisterReconTools() {
           int timeout = params.value("timeout", 120);
           std::string cmd;
           if (has_binary("naabu")) {
-            cmd = "naabu -host " + target + " -json -silent";
+            cmd = "naabu -host " + shell_quote(target) + " -json -silent";
             if (!ports.empty())
-              cmd += " -p " + ports;
+              cmd += " -p " + shell_quote(ports);
           } else {
             cmd = "nmap -sT -T4 --open -oX -";
             if (!ports.empty())
-              cmd += " -p " + ports;
-            cmd += " " + target;
+              cmd += " -p " + shell_quote(ports);
+            cmd += " " + shell_quote(target);
           }
           cmd += " 2>/dev/null";
           auto result = run_recon_cmd(cmd, timeout);
@@ -378,14 +395,14 @@ void ToolRegistry::RegisterReconTools() {
           bool follow = params.value("follow_redirects", true);
           std::string cmd;
           if (has_binary("httpx")) {
-            cmd = "echo '" + target +
-                  "' | httpx -json -silent -title -tech-detect -status-code "
+            cmd = "echo " + shell_quote(target) +
+                  " | httpx -json -silent -title -tech-detect -status-code "
                   "-content-length";
             if (follow) cmd += " -follow-redirects";
           } else {
             cmd = "curl -sI";
             if (follow) cmd += " -L";
-            cmd += " '" + target + "'";
+            cmd += " " + shell_quote(target);
           }
           cmd += " 2>/dev/null";
           auto result = run_recon_cmd(cmd, 30);
@@ -418,9 +435,11 @@ void ToolRegistry::RegisterReconTools() {
           auto target = params["target"].get<std::string>();
           auto rtype = params.value("record_type", "A");
           auto ns = params.value("nameserver", "");
-          std::string cmd = "dig " + target + " " + rtype + " +short";
+          std::string cmd =
+              "dig " + shell_quote(target) + " " + shell_quote(rtype) +
+              " +short";
           if (!ns.empty())
-            cmd += " @" + ns;
+            cmd += " " + shell_quote("@" + ns);
           cmd += " 2>/dev/null";
           auto result = run_recon_cmd(cmd, 15);
           return result.dump();
@@ -441,7 +460,7 @@ void ToolRegistry::RegisterReconTools() {
             {"required", {"target"}}},
         [this, run_recon_cmd](const nlohmann::json& params) -> std::string {
           auto target = params["target"].get<std::string>();
-          std::string cmd = "whois " + target + " 2>/dev/null";
+          std::string cmd = "whois " + shell_quote(target) + " 2>/dev/null";
           auto result = run_recon_cmd(cmd, 30);
           return result.dump();
         });
@@ -464,10 +483,11 @@ void ToolRegistry::RegisterReconTools() {
       [this, run_recon_cmd](const nlohmann::json& params) -> std::string {
         auto target = params["target"].get<std::string>();
         bool expired = params.value("include_expired", false);
-        std::string url = "https://crt.sh/?q=%25." + target + "&output=json";
+        std::string url =
+            "https://crt.sh/?q=%25." + url_encode(target) + "&output=json";
         if (!expired) url += "&exclude=expired";
         std::string cmd =
-            "curl -s '" + url + "' 2>/dev/null | head -c 65536";
+            "curl -s " + shell_quote(url) + " 2>/dev/null | head -c 65536";
         auto result = run_recon_cmd(cmd, 30);
         return result.dump();
       });
@@ -494,14 +514,16 @@ void ToolRegistry::RegisterReconTools() {
           auto filter = params.value("filter", "");
           std::string cmd;
           if (has_binary("waybackurls")) {
-            cmd = "echo '" + target + "' | waybackurls 2>/dev/null";
+            cmd = "echo " + shell_quote(target) + " | waybackurls 2>/dev/null";
           } else {
-            cmd = "curl -s 'https://web.archive.org/cdx/search/cdx?url=*." +
-                  target +
-                  "&output=text&fl=original&collapse=urlkey' 2>/dev/null";
+            cmd = "curl -s " +
+                  shell_quote("https://web.archive.org/cdx/search/cdx?url=*." +
+                              url_encode(target) +
+                              "&output=text&fl=original&collapse=urlkey") +
+                  " 2>/dev/null";
           }
           if (!filter.empty()) {
-            cmd += " | grep -i '" + filter + "'";
+            cmd += " | grep -i " + shell_quote(filter);
           }
           cmd += " | sort -u | head -500";
           auto result = run_recon_cmd(cmd, 60);
@@ -538,12 +560,13 @@ void ToolRegistry::RegisterReconTools() {
           auto target = params["target"].get<std::string>();
           auto severity = params.value("severity", "medium,high");
           int timeout = params.value("timeout", 300);
-          std::string cmd = "nuclei -u " + target + " -json -silent";
-          cmd += " -severity " + severity;
+          std::string cmd =
+              "nuclei -u " + shell_quote(target) + " -json -silent";
+          cmd += " -severity " + shell_quote(severity);
           if (params.contains("templates") && params["templates"].is_array()) {
             for (const auto& t : params["templates"]) {
               if (t.is_string())
-                cmd += " -t " + t.get<std::string>();
+                cmd += " -t " + shell_quote(t.get<std::string>());
             }
           }
           cmd += " 2>/dev/null";
@@ -573,16 +596,16 @@ void ToolRegistry::RegisterReconTools() {
           auto target = params["target"].get<std::string>();
           std::string cmd;
           if (has_binary("gowitness")) {
-            cmd = "gowitness single '" + target +
-                  "' --screenshot-path /tmp/recon-screenshots/ "
+            cmd = "gowitness single " + shell_quote(target) +
+                  " --screenshot-path /tmp/recon-screenshots/ "
                   "--screenshot-format png 2>/dev/null";
           } else {
             std::string chrome =
                 has_binary("chromium") ? "chromium" : "chromium-browser";
             cmd = chrome +
                   " --headless --disable-gpu --screenshot=/tmp/recon-"
-                  "screenshots/screenshot.png --window-size=1280,1024 '" +
-                  target + "' 2>/dev/null";
+                  "screenshots/screenshot.png --window-size=1280,1024 " +
+                  shell_quote(target) + " 2>/dev/null";
           }
           auto result = run_recon_cmd(cmd, 30);
           result["screenshot_dir"] = "/tmp/recon-screenshots/";
@@ -1256,6 +1279,10 @@ std::string ToolRegistry::apply_patch_tool(const nlohmann::json& params) {
   auto flush_file = [&]() {
     if (current_file.empty())
       return;
+    if (!quantclaw::SecuritySandbox::ValidateFilePath(current_file,
+                                                      workspace_path_))
+      throw std::runtime_error("Access denied: path outside workspace: " +
+                               current_file);
     if (op == FileOp::kAdd) {
       std::filesystem::create_directories(
           std::filesystem::path(current_file).parent_path());
@@ -1340,18 +1367,21 @@ std::string ToolRegistry::apply_patch_tool(const nlohmann::json& params) {
     diff_hunks.clear();
   };
 
+  constexpr std::string_view kAddMarker = "*** Add File: ";
+  constexpr std::string_view kUpdateMarker = "*** Update File: ";
+  constexpr std::string_view kDeleteMarker = "*** Delete File: ";
   for (const auto& l : lines) {
-    if (l.substr(0, 16) == "*** Add File: ") {
+    if (l.starts_with(kAddMarker)) {
       flush_file();
-      current_file = l.substr(14);
+      current_file = l.substr(kAddMarker.size());
       op = FileOp::kAdd;
-    } else if (l.substr(0, 19) == "*** Update File: ") {
+    } else if (l.starts_with(kUpdateMarker)) {
       flush_file();
-      current_file = l.substr(17);
+      current_file = l.substr(kUpdateMarker.size());
       op = FileOp::kUpdate;
-    } else if (l.substr(0, 19) == "*** Delete File: ") {
+    } else if (l.starts_with(kDeleteMarker)) {
       flush_file();
-      current_file = l.substr(17);
+      current_file = l.substr(kDeleteMarker.size());
       op = FileOp::kDelete;
     } else if (op == FileOp::kAdd) {
       add_content.push_back(l);
@@ -1375,6 +1405,7 @@ std::string ToolRegistry::process_tool(const nlohmann::json& params) {
     std::lock_guard<std::mutex> lk(bg_mu_);
     nlohmann::json sessions = nlohmann::json::array();
     for (auto& [sid, sess] : bg_sessions_) {
+      std::lock_guard<std::mutex> slk(sess->mu);
       // Poll future without blocking
       if (!sess->exited && sess->future.valid() &&
           sess->future.wait_for(std::chrono::seconds(0)) ==
@@ -1437,6 +1468,7 @@ std::string ToolRegistry::process_tool(const nlohmann::json& params) {
 
   if (action == "log" || action == "poll") {
     int timeout_ms = params.value("timeout", 5000);
+    std::lock_guard<std::mutex> slk(sess->mu);
     if (!sess->exited && sess->future.valid()) {
       auto status =
           sess->future.wait_for(std::chrono::milliseconds(timeout_ms));
@@ -1458,12 +1490,14 @@ std::string ToolRegistry::process_tool(const nlohmann::json& params) {
 
   if (action == "kill") {
     // Best-effort: mark as done
+    std::lock_guard<std::mutex> slk(sess->mu);
     sess->exited = true;
     sess->error = "killed by user";
     return nlohmann::json{{"ok", true}, {"id", id}}.dump();
   }
 
   if (action == "clear") {
+    std::lock_guard<std::mutex> slk(sess->mu);
     sess->output.clear();
     return nlohmann::json{{"ok", true}}.dump();
   }

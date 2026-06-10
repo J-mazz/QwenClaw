@@ -579,6 +579,18 @@ std::string get_str(duckdb_result* result, idx_t col, idx_t row) {
   return s;
 }
 
+// Escape a string for interpolation inside a single-quoted SQL literal.
+std::string sql_escape(const std::string& s) {
+  std::string out;
+  out.reserve(s.size());
+  for (char c : s) {
+    out += c;
+    if (c == '\'')
+      out += '\'';
+  }
+  return out;
+}
+
 }  // namespace
 
 nlohmann::json
@@ -591,7 +603,7 @@ EvolveRuntime::GetRunState(const std::string& run_id) const {
       "SELECT run_id, session_key, experiment_name, state, started_at, "
       "ended_at, best_candidate_id, best_score, last_error "
       "FROM evolve_runs WHERE run_id = '" +
-      run_id + "';";
+      sql_escape(run_id) + "';";
 
   duckdb_result result;
   if (duckdb_query(con, sql.c_str(), &result) == DuckDBError) {
@@ -623,7 +635,7 @@ EvolveRuntime::GetBestCandidate(const std::string& run_id) const {
   std::string sql =
       "SELECT candidate_id, round, score, program_path, metrics_json "
       "FROM evolve_candidates WHERE run_id = '" +
-      run_id + "' AND state = 'evaluated' "
+      sql_escape(run_id) + "' AND state = 'evaluated' "
                "ORDER BY score DESC, created_at ASC LIMIT 1;";
 
   duckdb_result result;
@@ -656,7 +668,7 @@ nlohmann::json EvolveRuntime::ExportRun(const std::string& run_id) const {
     std::string sql =
         "SELECT run_id, state, started_at, ended_at, best_candidate_id, "
         "best_score, experiment_name FROM evolve_runs WHERE run_id = '" +
-        run_id + "';";
+        sql_escape(run_id) + "';";
     duckdb_result result;
     if (duckdb_query(con, sql.c_str(), &result) != DuckDBError &&
         duckdb_row_count(&result) > 0) {
@@ -678,7 +690,7 @@ nlohmann::json EvolveRuntime::ExportRun(const std::string& run_id) const {
     std::string sql =
         "SELECT candidate_id, round, parent_id, score, state, created_at "
         "FROM evolve_candidates WHERE run_id = '" +
-        run_id + "' ORDER BY round ASC, created_at ASC;";
+        sql_escape(run_id) + "' ORDER BY round ASC, created_at ASC;";
     duckdb_result result;
     if (duckdb_query(con, sql.c_str(), &result) != DuckDBError) {
       auto& arr = out["candidates"] = nlohmann::json::array();
@@ -702,7 +714,7 @@ nlohmann::json EvolveRuntime::ExportRun(const std::string& run_id) const {
     std::string sql =
         "SELECT lesson_id, round, candidate_id, text, created_at "
         "FROM evolve_lessons WHERE run_id = '" +
-        run_id + "' ORDER BY round ASC, created_at ASC;";
+        sql_escape(run_id) + "' ORDER BY round ASC, created_at ASC;";
     duckdb_result result;
     if (duckdb_query(con, sql.c_str(), &result) != DuckDBError) {
       auto& arr = out["lessons"] = nlohmann::json::array();
@@ -725,7 +737,7 @@ nlohmann::json EvolveRuntime::ExportRun(const std::string& run_id) const {
     std::string sql =
         "SELECT from_id, to_id, edge_type, created_at "
         "FROM evolve_edges WHERE run_id = '" +
-        run_id + "' ORDER BY created_at ASC;";
+        sql_escape(run_id) + "' ORDER BY created_at ASC;";
     duckdb_result result;
     if (duckdb_query(con, sql.c_str(), &result) != DuckDBError) {
       auto& arr = out["edges"] = nlohmann::json::array();

@@ -1,5 +1,9 @@
 import { afterEach, beforeEach } from "vitest";
-import { QuantClawApp } from "../app.ts";
+// Side-effect import: registers the <quantclaw-app> custom element. A bare
+// `import { QuantClawApp }` gets elided by the TS transform because the
+// binding is only used in type positions, leaving the element undefined.
+import "../app.ts";
+import type { QuantClawApp } from "../app.ts";
 
 export function mountApp(pathname: string) {
   window.history.replaceState({}, "", pathname);

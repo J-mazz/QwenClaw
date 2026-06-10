@@ -153,16 +153,20 @@ std::string BrowserSession::evaluate_js(const std::string& expression) {
 }
 
 bool BrowserSession::click(const std::string& selector) {
-  std::string js = "document.querySelector('" + selector + "')?.click()";
+  // JSON-encode to produce a correctly escaped JS string literal — selectors
+  // may legitimately contain quotes or backslashes.
+  std::string js = "document.querySelector(" +
+                   nlohmann::json(selector).dump() + ")?.click()";
   auto result = evaluate_js(js);
   return !result.empty();
 }
 
 bool BrowserSession::type(const std::string& selector,
                           const std::string& text) {
-  std::string js = "(() => { var el = document.querySelector('" + selector +
-                   "'); if(el) { el.value = '" + text +
-                   "'; el.dispatchEvent(new Event('input')); return true; } "
+  std::string js = "(() => { var el = document.querySelector(" +
+                   nlohmann::json(selector).dump() +
+                   "); if(el) { el.value = " + nlohmann::json(text).dump() +
+                   "; el.dispatchEvent(new Event('input')); return true; } "
                    "return false; })()";
   auto result = evaluate_js(js);
   return result.find("true") != std::string::npos;
@@ -469,7 +473,7 @@ std::string BrowserSession::find_chromium() {
       "which chromium-browser chromium google-chrome 2>/dev/null", 5);
   if (result.exit_code == 0 && !result.output.empty()) {
     auto line = result.output.substr(0, result.output.find('\n'));
-    if (!line.empty() && line.back() == '\n')
+    if (!line.empty() && line.back() == '\r')
       line.pop_back();
     if (!line.empty())
       return line;

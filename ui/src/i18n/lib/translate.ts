@@ -19,11 +19,16 @@ class I18nManager {
   }
 
   private loadLocale() {
-    const saved = localStorage.getItem("quantclaw.i18n.locale");
+    // Guard browser globals: this module is also imported from Node contexts
+    // (unit tests, tooling) where localStorage/navigator do not exist.
+    const saved =
+      typeof localStorage === "undefined"
+        ? null
+        : localStorage.getItem("quantclaw.i18n.locale");
     if (isSupportedLocale(saved)) {
       this.locale = saved;
     } else {
-      const navLang = navigator.language;
+      const navLang = typeof navigator === "undefined" ? "en" : navigator.language;
       if (navLang.startsWith("zh")) {
         this.locale = navLang === "zh-TW" || navLang === "zh-HK" ? "zh-TW" : "zh-CN";
       } else if (navLang.startsWith("pt")) {
@@ -64,7 +69,9 @@ class I18nManager {
     }
 
     this.locale = locale;
-    localStorage.setItem("quantclaw.i18n.locale", locale);
+    if (typeof localStorage !== "undefined") {
+      localStorage.setItem("quantclaw.i18n.locale", locale);
+    }
     this.notify();
   }
 

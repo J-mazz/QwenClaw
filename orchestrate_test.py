@@ -6,11 +6,25 @@ import json
 import requests
 import math
 
-MODEL_PATH = "/home/jmazz/Projects/QuantClaw/providers.local/qwen3.5-9B-claude4.6-distillation/Qwen3.5-9B.Q5_K_M.gguf"
-SIDECAR_PATH = "/home/jmazz/Projects/QuantClaw/tmp/Qwen3.5-9B.Q5_K_M.turboquant.bin"
-LLAMA_SERVER = "/home/jmazz/Projects/QuantClaw/build-cmake43/bin/llama-server"
-TMP_DIR = "/home/jmazz/Projects/QuantClaw/tmp"
-ENCODER = "/home/jmazz/Projects/QuantClaw/scripts/turboquant_encode.py"
+REPO_ROOT = os.path.dirname(os.path.abspath(__file__))
+
+MODEL_PATH = os.environ.get(
+    "QC_MODEL_PATH",
+    os.path.join(
+        REPO_ROOT,
+        "providers.local/qwen3.5-9B-claude4.6-distillation/Qwen3.5-9B.Q5_K_M.gguf",
+    ),
+)
+TMP_DIR = os.environ.get("QC_TMP_DIR", os.path.join(REPO_ROOT, "tmp"))
+SIDECAR_PATH = os.environ.get(
+    "QC_SIDECAR_PATH", os.path.join(TMP_DIR, "Qwen3.5-9B.Q5_K_M.turboquant.bin")
+)
+LLAMA_SERVER = os.environ.get(
+    "QC_LLAMA_SERVER", os.path.join(REPO_ROOT, "build-cmake43/bin/llama-server")
+)
+ENCODER = os.environ.get(
+    "QC_ENCODER", os.path.join(REPO_ROOT, "scripts/turboquant_encode.py")
+)
 
 SIDECAR_NUM_LAYERS   = 24
 SIDECAR_HEAD_DIM     = 256

@@ -292,13 +292,18 @@ function matchesSearch(params: {
   const q = criteria.text;
   const meta = SECTION_META[params.key];
 
+  // Section-level text shortcuts only apply when there are no tag filters:
+  // sections themselves carry no tags, so a tag-filtered query must fall
+  // through to the per-field search where text AND tags are both enforced.
+  const noTagFilters = criteria.tags.length === 0;
+
   // Check key name
-  if (q && params.key.toLowerCase().includes(q)) {
+  if (q && noTagFilters && params.key.toLowerCase().includes(q)) {
     return true;
   }
 
   // Check label and description
-  if (q && meta) {
+  if (q && noTagFilters && meta) {
     if (meta.label.toLowerCase().includes(q)) {
       return true;
     }

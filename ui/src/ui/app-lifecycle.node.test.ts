@@ -26,6 +26,11 @@ function createHost() {
 
 describe("handleDisconnected", () => {
   it("stops and clears gateway client on teardown", () => {
+    // This file runs under both the browser suite and the pure-Node suite;
+    // in Node there is no window global, so provide a minimal stub first.
+    if (typeof window === "undefined") {
+      vi.stubGlobal("window", { removeEventListener: () => undefined });
+    }
     const removeSpy = vi.spyOn(window, "removeEventListener").mockImplementation(() => undefined);
     const host = createHost();
     const disconnectSpy = (
@@ -40,5 +45,6 @@ describe("handleDisconnected", () => {
     expect(disconnectSpy).toHaveBeenCalledTimes(1);
     expect(host.topbarObserver).toBeNull();
     removeSpy.mockRestore();
+    vi.unstubAllGlobals();
   });
 });
