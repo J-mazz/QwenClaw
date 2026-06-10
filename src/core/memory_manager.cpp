@@ -256,10 +256,20 @@ void MemoryManager::StartFileWatcher() {
   watching_ = true;
 
   watcher_thread_ = std::make_unique<std::thread>([this]() {
+    // Close the read end of the wake pipe on every exit path so a failed
+    // start does not leak the fd or block a later restart.
+    auto close_wakeup_read = [this]() {
+      if (wakeup_pipe_[0] >= 0) {
+        ::close(wakeup_pipe_[0]);
+        wakeup_pipe_[0] = -1;
+      }
+    };
+
     // Set up inotify instance watching the workspace directory
     int ifd = ::inotify_init1(IN_CLOEXEC | IN_NONBLOCK);
     if (ifd < 0) {
       logger_->error("inotify_init1 failed: {}", std::strerror(errno));
+      close_wakeup_read();
       return;
     }
 
@@ -270,6 +280,7 @@ void MemoryManager::StartFileWatcher() {
       logger_->error("inotify_add_watch failed for {}: {}",
                      workspace_path_.string(), std::strerror(errno));
       ::close(ifd);
+      close_wakeup_read();
       return;
     }
 
@@ -348,8 +359,7 @@ void MemoryManager::StartFileWatcher() {
     ::inotify_rm_watch(ifd, wd);
     ::close(ifd);
     // Drain and close the read end of the wake pipe
-    ::close(wakeup_pipe_[0]);
-    wakeup_pipe_[0] = -1;
+    close_wakeup_read();
   });
 
   logger_->info("File watcher started (inotify) for workspace: {}",
@@ -357,9 +367,10 @@ void MemoryManager::StartFileWatcher() {
 }
 
 void MemoryManager::StopFileWatcher() {
-  if (!watching_)
-    return;
-  watching_ = false;
+  // No early return on !watching_: even if the watcher thread bailed out
+  // during startup, the write end of the pipe and the thread handle still
+  // need to be cleaned up so the watcher can be restarted.
+  bool was_watching = watching_.exchange(false);
   // Unblock the poll() call in the watcher thread via the self-pipe
   if (wakeup_pipe_[1] >= 0) {
     const char byte = 1;
@@ -371,7 +382,9 @@ void MemoryManager::StopFileWatcher() {
     watcher_thread_->join();
   }
   watcher_thread_.reset();
-  logger_->info("File watcher stopped");
+  if (was_watching) {
+    logger_->info("File watcher stopped");
+  }
 }
 
 void MemoryManager::SetFileChangeCallback(FileChangeCallback cb) {

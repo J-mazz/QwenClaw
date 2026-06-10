@@ -19,6 +19,7 @@ class SignalHandler {
 
  private:
   static std::atomic<bool> shutdown_requested_;
+  static std::atomic<bool> reload_requested_;
   static ShutdownCallback shutdown_callback_;
   static ReloadCallback reload_callback_;
   static void signal_handler(int signum);

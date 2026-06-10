@@ -32,6 +32,18 @@ bool run_sql(duckdb_connection con, const char* sql, std::string* error_out) {
   return true;
 }
 
+// Escape a string for interpolation inside a single-quoted SQL literal.
+std::string sql_escape(const std::string& s) {
+  std::string out;
+  out.reserve(s.size());
+  for (char c : s) {
+    out += c;
+    if (c == '\'')
+      out += '\'';
+  }
+  return out;
+}
+
 // Severity ordering for auto-escalation threshold comparison.
 int severity_rank(const std::string& severity) {
   if (severity == "critical") return 4;
@@ -441,9 +453,9 @@ nlohmann::json ReconRuntime::QueryFindings(
   std::string sql =
       "SELECT finding_id, severity, finding_type, evidence_json, tool_name, "
       "created_at FROM recon_findings WHERE target_id = '" +
-      target_id + "'";
+      sql_escape(target_id) + "'";
   if (!severity_filter.empty()) {
-    sql += " AND severity = '" + severity_filter + "'";
+    sql += " AND severity = '" + sql_escape(severity_filter) + "'";
   }
   sql += " ORDER BY created_at DESC;";
 

@@ -39,6 +39,9 @@ class ToolRegistry {
 		int exit_code = -1;
 		std::chrono::system_clock::time_point started_at;
 		bool exited = false;
+		// Serializes future polling / output mutation across concurrent
+		// process-tool calls targeting the same session.
+		std::mutex mu;
 	};
 
  private:

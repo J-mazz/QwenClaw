@@ -48,6 +48,9 @@ providers.local/
 # Logs and runtime
 *.log
 *.pid
+coverage.info
+ninja_out.txt
+test_out.txt
 
 # Node dependencies and build output
 node_modules/
