@@ -1,3 +1,4 @@
+import { GATEWAY_CLIENT_IDS } from "../gateway/protocol/client-info.ts";
 import {
   GATEWAY_EVENT_UPDATE_AVAILABLE,
   type GatewayUpdateAvailableEventPayload,
@@ -149,7 +150,7 @@ export function connectGateway(host: GatewayHost) {
     url: host.settings.gatewayUrl,
     token: host.settings.token.trim() ? host.settings.token : undefined,
     password: host.password.trim() ? host.password : undefined,
-    clientName: "quantclaw-control-ui",
+    clientName: GATEWAY_CLIENT_IDS.CONTROL_UI,
     mode: "webchat",
     instanceId: host.clientInstanceId,
     onHello: (hello) => {

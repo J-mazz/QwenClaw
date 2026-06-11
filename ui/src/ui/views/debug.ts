@@ -13,6 +13,7 @@ export type DebugProps = {
   callParams: string;
   callResult: string | null;
   callError: string | null;
+  loadError: string | null;
   onCallMethodChange: (next: string) => void;
   onCallParamsChange: (next: string) => void;
   onRefresh: () => void;
@@ -45,6 +46,11 @@ export function renderDebug(props: DebugProps) {
           </button>
         </div>
         <div class="stack" style="margin-top: 12px;">
+          ${
+            props.loadError
+              ? html`<div class="callout danger">Failed to refresh: ${props.loadError}</div>`
+              : nothing
+          }
           <div>
             <div class="muted">Status</div>
             ${

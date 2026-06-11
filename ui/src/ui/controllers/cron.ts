@@ -1,6 +1,7 @@
 import { DEFAULT_CRON_FORM } from "../app-defaults.ts";
 import { toNumber } from "../format.ts";
 import type { GatewayBrowserClient } from "../gateway.ts";
+import { beginLoad } from "./load-guard.ts";
 import type {
   CronJob,
   CronDeliveryStatus,
@@ -230,12 +231,9 @@ export async function loadCronJobsPage(state: CronState, opts?: { append?: boole
   if (!state.client || !state.connected) {
     return;
   }
-  if (state.cronLoading || state.cronJobsLoadingMore) {
-    return;
-  }
   const append = opts?.append === true;
   if (append) {
-    if (!state.cronJobsHasMore) {
+    if (state.cronLoading || state.cronJobsLoadingMore || !state.cronJobsHasMore) {
       return;
     }
     state.cronJobsLoadingMore = true;
@@ -243,6 +241,7 @@ export async function loadCronJobsPage(state: CronState, opts?: { append?: boole
     state.cronLoading = true;
   }
   state.cronError = null;
+  const isCurrent = beginLoad(state, "cronJobs");
   try {
     const offset = append ? Math.max(0, state.cronJobsNextOffset ?? state.cronJobs.length) : 0;
     const res = await state.client.request<CronJobsListResult>("cron.list", {
@@ -254,6 +253,9 @@ export async function loadCronJobsPage(state: CronState, opts?: { append?: boole
       sortBy: state.cronJobsSortBy,
       sortDir: state.cronJobsSortDir,
     });
+    if (!isCurrent()) {
+      return;
+    }
     const jobs = Array.isArray(res.jobs) ? res.jobs : [];
     state.cronJobs = append ? [...state.cronJobs, ...jobs] : jobs;
     const meta = normalizeCronPageMeta({
@@ -274,11 +276,13 @@ export async function loadCronJobsPage(state: CronState, opts?: { append?: boole
       clearCronEditState(state);
     }
   } catch (err) {
-    state.cronError = String(err);
+    if (isCurrent()) {
+      state.cronError = String(err);
+    }
   } finally {
     if (append) {
       state.cronJobsLoadingMore = false;
-    } else {
+    } else if (isCurrent()) {
       state.cronLoading = false;
     }
   }
@@ -646,6 +650,7 @@ export async function loadCronRuns(
   if (append && !state.cronRunsHasMore) {
     return;
   }
+  const isCurrent = beginLoad(state, "cronRuns");
   try {
     if (append) {
       state.cronRunsLoadingMore = true;
@@ -663,6 +668,9 @@ export async function loadCronRuns(
       query: state.cronRunsQuery.trim() || undefined,
       sortDir: state.cronRunsSortDir,
     });
+    if (!isCurrent()) {
+      return;
+    }
     const entries = Array.isArray(res.entries) ? res.entries : [];
     state.cronRuns =
       append && (scope === "all" || state.cronRunsJobId === activeJobId)
@@ -683,7 +691,9 @@ export async function loadCronRuns(
     state.cronRunsHasMore = meta.hasMore;
     state.cronRunsNextOffset = meta.nextOffset;
   } catch (err) {
-    state.cronError = String(err);
+    if (isCurrent()) {
+      state.cronError = String(err);
+    }
   } finally {
     if (append) {
       state.cronRunsLoadingMore = false;

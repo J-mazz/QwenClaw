@@ -99,6 +99,7 @@ export class GatewayBrowserClient {
   private connectNonce: string | null = null;
   private connectSent = false;
   private connectTimer: number | null = null;
+  private reconnectTimer: number | null = null;
   private backoffMs = 800;
   private pendingConnectError: GatewayErrorInfo | undefined;
 
@@ -111,6 +112,16 @@ export class GatewayBrowserClient {
 
   stop() {
     this.closed = true;
+    if (this.connectTimer !== null) {
+      window.clearTimeout(this.connectTimer);
+      this.connectTimer = null;
+    }
+    if (this.reconnectTimer !== null) {
+      window.clearTimeout(this.reconnectTimer);
+      this.reconnectTimer = null;
+    }
+    this.connectSent = false;
+    this.connectNonce = null;
     this.ws?.close();
     this.ws = null;
     this.pendingConnectError = undefined;
@@ -148,7 +159,13 @@ export class GatewayBrowserClient {
     }
     const delay = this.backoffMs;
     this.backoffMs = Math.min(this.backoffMs * 1.7, 15_000);
-    window.setTimeout(() => this.connect(), delay);
+    if (this.reconnectTimer !== null) {
+      window.clearTimeout(this.reconnectTimer);
+    }
+    this.reconnectTimer = window.setTimeout(() => {
+      this.reconnectTimer = null;
+      this.connect();
+    }, delay);
   }
 
   private flushPending(err: Error) {
@@ -158,8 +175,15 @@ export class GatewayBrowserClient {
     this.pending.clear();
   }
 
-  private async sendConnect() {
-    if (this.connectSent) {
+  private sendConnect() {
+    this.sendConnectInner().catch((err: unknown) => {
+      console.error("[gateway] connect failed:", err);
+      this.ws?.close(CONNECT_FAILED_CLOSE_CODE, "connect failed");
+    });
+  }
+
+  private async sendConnectInner() {
+    if (this.connectSent || this.closed) {
       return;
     }
     this.connectSent = true;
@@ -293,7 +317,7 @@ export class GatewayBrowserClient {
         const nonce = payload && typeof payload.nonce === "string" ? payload.nonce : null;
         if (nonce) {
           this.connectNonce = nonce;
-          void this.sendConnect();
+          this.sendConnect();
         }
         return;
       }
@@ -354,7 +378,7 @@ export class GatewayBrowserClient {
       window.clearTimeout(this.connectTimer);
     }
     this.connectTimer = window.setTimeout(() => {
-      void this.sendConnect();
+      this.sendConnect();
     }, 750);
   }
 }

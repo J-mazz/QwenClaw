@@ -1103,6 +1103,7 @@ export function renderApp(state: AppViewState) {
                 callParams: state.debugCallParams,
                 callResult: state.debugCallResult,
                 callError: state.debugCallError,
+                loadError: state.debugLoadError,
                 onCallMethodChange: (next) => (state.debugCallMethod = next),
                 onCallParamsChange: (next) => (state.debugCallParams = next),
                 onRefresh: () => loadDebug(state),

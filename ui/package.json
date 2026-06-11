@@ -6,7 +6,8 @@
     "build": "vite build",
     "dev": "vite",
     "preview": "vite preview",
-    "test": "vitest run --config vitest.config.ts"
+    "test": "vitest run --config vitest.config.ts",
+    "typecheck": "tsc --noEmit"
   },
   "dependencies": {
     "@lit-labs/signals": "^0.2.0",
@@ -23,6 +24,7 @@
     "@vitest/browser-playwright": "4.0.18",
     "@vitest/coverage-v8": "^4.0.18",
     "playwright": "^1.58.2",
+    "typescript": "5.9",
     "vitest": "4.0.18"
   }
 }

@@ -168,6 +168,10 @@ function resolveFieldMeta(
   };
 }
 
+function fieldIdForPath(path: Array<string | number>): string {
+  return `cfg-field-${path.map((p) => String(p).replace(/[^a-zA-Z0-9_-]/g, "_")).join("-")}`;
+}
+
 function matchesText(text: string, candidates: Array<string | undefined>): boolean {
   if (!text) {
     return true;
@@ -386,7 +390,7 @@ export function renderNode(params: {
           ${showLabel ? html`<label class="cfg-field__label">${label}</label>` : nothing}
           ${help ? html`<div class="cfg-field__help">${help}</div>` : nothing}
           ${renderTags(tags)}
-          <div class="cfg-segmented">
+          <div class="cfg-segmented" role="group" aria-label=${label}>
             ${literals.map(
               (lit) => html`
               <button
@@ -452,7 +456,7 @@ export function renderNode(params: {
           ${showLabel ? html`<label class="cfg-field__label">${label}</label>` : nothing}
           ${help ? html`<div class="cfg-field__help">${help}</div>` : nothing}
           ${renderTags(tags)}
-          <div class="cfg-segmented">
+          <div class="cfg-segmented" role="group" aria-label=${label}>
             ${options.map(
               (opt) => html`
               <button
@@ -555,14 +559,16 @@ function renderTextInput(params: {
         ? `Default: ${String(schema.default)}`
         : "");
   const displayValue = value ?? "";
+  const fieldId = fieldIdForPath(path);
 
   return html`
     <div class="cfg-field">
-      ${showLabel ? html`<label class="cfg-field__label">${label}</label>` : nothing}
+      ${showLabel ? html`<label class="cfg-field__label" for=${fieldId}>${label}</label>` : nothing}
       ${help ? html`<div class="cfg-field__help">${help}</div>` : nothing}
       ${renderTags(tags)}
       <div class="cfg-input-wrap">
         <input
+          id=${fieldId}
           type=${isSensitive ? "password" : inputType}
           class="cfg-input"
           placeholder=${placeholder}
@@ -596,6 +602,7 @@ function renderTextInput(params: {
             type="button"
             class="cfg-input__reset"
             title="Reset to default"
+            aria-label="Reset to default"
             ?disabled=${disabled}
             @click=${() => onPatch(path, schema.default)}
           >↺</button>
@@ -622,20 +629,23 @@ function renderNumberInput(params: {
   const { label, help, tags } = resolveFieldMeta(path, schema, hints);
   const displayValue = value ?? schema.default ?? "";
   const numValue = typeof displayValue === "number" ? displayValue : 0;
+  const fieldId = fieldIdForPath(path);
 
   return html`
     <div class="cfg-field">
-      ${showLabel ? html`<label class="cfg-field__label">${label}</label>` : nothing}
+      ${showLabel ? html`<label class="cfg-field__label" for=${fieldId}>${label}</label>` : nothing}
       ${help ? html`<div class="cfg-field__help">${help}</div>` : nothing}
       ${renderTags(tags)}
       <div class="cfg-number">
         <button
           type="button"
           class="cfg-number__btn"
+          aria-label="Decrease ${label}"
           ?disabled=${disabled}
           @click=${() => onPatch(path, numValue - 1)}
         >−</button>
         <input
+          id=${fieldId}
           type="number"
           class="cfg-number__input"
           .value=${displayValue == null ? "" : String(displayValue)}
@@ -649,6 +659,7 @@ function renderNumberInput(params: {
         <button
           type="button"
           class="cfg-number__btn"
+          aria-label="Increase ${label}"
           ?disabled=${disabled}
           @click=${() => onPatch(path, numValue + 1)}
         >+</button>
@@ -676,13 +687,15 @@ function renderSelect(params: {
     (opt) => opt === resolvedValue || String(opt) === String(resolvedValue),
   );
   const unset = "__unset__";
+  const fieldId = fieldIdForPath(path);
 
   return html`
     <div class="cfg-field">
-      ${showLabel ? html`<label class="cfg-field__label">${label}</label>` : nothing}
+      ${showLabel ? html`<label class="cfg-field__label" for=${fieldId}>${label}</label>` : nothing}
       ${help ? html`<div class="cfg-field__help">${help}</div>` : nothing}
       ${renderTags(tags)}
       <select
+        id=${fieldId}
         class="cfg-select"
         ?disabled=${disabled}
         .value=${currentIndex >= 0 ? String(currentIndex) : unset}

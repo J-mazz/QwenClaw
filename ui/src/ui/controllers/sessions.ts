@@ -1,5 +1,6 @@
 import { toNumber } from "../format.ts";
 import type { GatewayBrowserClient } from "../gateway.ts";
+import { beginLoad } from "./load-guard.ts";
 import type { SessionsListResult } from "../types.ts";
 
 export type SessionsState = {
@@ -26,11 +27,9 @@ export async function loadSessions(
   if (!state.client || !state.connected) {
     return;
   }
-  if (state.sessionsLoading) {
-    return;
-  }
   state.sessionsLoading = true;
   state.sessionsError = null;
+  const isCurrent = beginLoad(state, "sessions");
   try {
     const includeGlobal = overrides?.includeGlobal ?? state.sessionsIncludeGlobal;
     const includeUnknown = overrides?.includeUnknown ?? state.sessionsIncludeUnknown;
@@ -47,13 +46,20 @@ export async function loadSessions(
       params.limit = limit;
     }
     const res = await state.client.request<SessionsListResult | undefined>("sessions.list", params);
+    if (!isCurrent()) {
+      return;
+    }
     if (res) {
       state.sessionsResult = res;
     }
   } catch (err) {
-    state.sessionsError = String(err);
+    if (isCurrent()) {
+      state.sessionsError = String(err);
+    }
   } finally {
-    state.sessionsLoading = false;
+    if (isCurrent()) {
+      state.sessionsLoading = false;
+    }
   }
 }
 

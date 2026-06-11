@@ -92,7 +92,7 @@ function renderFilterChips(
           ? html`
             <div class="filter-chip">
               <span class="filter-chip-label">Days: ${daysLabel}</span>
-              <button class="filter-chip-remove" @click=${onClearDays} title="Remove filter">×</button>
+              <button class="filter-chip-remove" @click=${onClearDays} title="Remove filter" aria-label="Remove day filter">×</button>
             </div>
           `
           : nothing
@@ -102,7 +102,7 @@ function renderFilterChips(
           ? html`
             <div class="filter-chip">
               <span class="filter-chip-label">Hours: ${hoursLabel}</span>
-              <button class="filter-chip-remove" @click=${onClearHours} title="Remove filter">×</button>
+              <button class="filter-chip-remove" @click=${onClearHours} title="Remove filter" aria-label="Remove hour filter">×</button>
             </div>
           `
           : nothing
@@ -112,7 +112,7 @@ function renderFilterChips(
           ? html`
             <div class="filter-chip" title="${sessionsFullName}">
               <span class="filter-chip-label">Session: ${sessionsLabel}</span>
-              <button class="filter-chip-remove" @click=${onClearSessions} title="Remove filter">×</button>
+              <button class="filter-chip-remove" @click=${onClearSessions} title="Remove filter" aria-label="Remove session filter">×</button>
             </div>
           `
           : nothing

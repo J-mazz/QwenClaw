@@ -1,4 +1,5 @@
 import type { GatewayBrowserClient } from "../gateway.ts";
+import { beginLoad } from "./load-guard.ts";
 import type { SessionsUsageResult, CostUsageSummary, SessionUsageTimeSeries } from "../types.ts";
 import type { SessionLogEntry } from "../views/usage.ts";
 
@@ -194,11 +195,9 @@ export async function loadUsage(
   if (!client || !state.connected) {
     return;
   }
-  if (state.usageLoading) {
-    return;
-  }
   state.usageLoading = true;
   state.usageError = null;
+  const isCurrent = beginLoad(state, "usage");
   try {
     const startDate = overrides?.startDate ?? state.usageStartDate;
     const endDate = overrides?.endDate ?? state.usageEndDate;
@@ -224,6 +223,9 @@ export async function loadUsage(
     };
 
     const applyUsageResults = (sessionsRes: unknown, costRes: unknown) => {
+      if (!isCurrent()) {
+        return;
+      }
       if (sessionsRes) {
         state.usageResult = sessionsRes as SessionsUsageResult;
       }
@@ -248,9 +250,13 @@ export async function loadUsage(
       }
     }
   } catch (err) {
-    state.usageError = toErrorMessage(err);
+    if (isCurrent()) {
+      state.usageError = toErrorMessage(err);
+    }
   } finally {
-    state.usageLoading = false;
+    if (isCurrent()) {
+      state.usageLoading = false;
+    }
   }
 }
 
@@ -271,21 +277,26 @@ export async function loadSessionTimeSeries(state: UsageState, sessionKey: strin
   if (!state.client || !state.connected) {
     return;
   }
-  if (state.usageTimeSeriesLoading) {
-    return;
-  }
   state.usageTimeSeriesLoading = true;
   state.usageTimeSeries = null;
+  const isCurrent = beginLoad(state, "usageTimeSeries");
   try {
     const res = await state.client.request("sessions.usage.timeseries", { key: sessionKey });
+    if (!isCurrent()) {
+      return;
+    }
     if (res) {
       state.usageTimeSeries = res as SessionUsageTimeSeries;
     }
   } catch {
     // Silently fail - time series is optional
-    state.usageTimeSeries = null;
+    if (isCurrent()) {
+      state.usageTimeSeries = null;
+    }
   } finally {
-    state.usageTimeSeriesLoading = false;
+    if (isCurrent()) {
+      state.usageTimeSeriesLoading = false;
+    }
   }
 }
 
@@ -293,23 +304,28 @@ export async function loadSessionLogs(state: UsageState, sessionKey: string) {
   if (!state.client || !state.connected) {
     return;
   }
-  if (state.usageSessionLogsLoading) {
-    return;
-  }
   state.usageSessionLogsLoading = true;
   state.usageSessionLogs = null;
+  const isCurrent = beginLoad(state, "usageSessionLogs");
   try {
     const res = await state.client.request("sessions.usage.logs", {
       key: sessionKey,
       limit: 1000,
     });
+    if (!isCurrent()) {
+      return;
+    }
     if (res && Array.isArray((res as { logs: SessionLogEntry[] }).logs)) {
       state.usageSessionLogs = (res as { logs: SessionLogEntry[] }).logs;
     }
   } catch {
     // Silently fail - logs are optional
-    state.usageSessionLogs = null;
+    if (isCurrent()) {
+      state.usageSessionLogs = null;
+    }
   } finally {
-    state.usageSessionLogsLoading = false;
+    if (isCurrent()) {
+      state.usageSessionLogsLoading = false;
+    }
   }
 }

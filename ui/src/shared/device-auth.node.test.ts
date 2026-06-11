@@ -6,7 +6,7 @@ describe("normalizeDeviceAuthScopes", () => {
     const descriptor = Object.getOwnPropertyDescriptor(Array.prototype, "toSorted");
 
     try {
-      delete (Array.prototype as Array<unknown> & { toSorted?: unknown }).toSorted;
+      delete (Array.prototype as unknown as { toSorted?: unknown }).toSorted;
 
       expect(normalizeDeviceAuthScopes([" beta ", "alpha", "beta"])).toEqual(["alpha", "beta"]);
     } finally {

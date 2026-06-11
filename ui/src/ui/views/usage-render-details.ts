@@ -274,7 +274,7 @@ function renderSessionDetailPanel(
               : nothing
           }
         </div>
-        <button class="session-close-btn" @click=${onClose} title="Close session details">×</button>
+        <button class="session-close-btn" @click=${onClose} title="Close session details" aria-label="Close session details">×</button>
       </div>
       <div class="session-detail-content">
         ${renderSessionSummary(

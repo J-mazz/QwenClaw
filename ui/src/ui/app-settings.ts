@@ -301,19 +301,21 @@ export function attachThemeListener(host: SettingsHost) {
 }
 
 export function detachThemeListener(host: SettingsHost) {
-  if (!host.themeMedia || !host.themeMediaHandler) {
+  const media = host.themeMedia;
+  const handler = host.themeMediaHandler;
+  if (!media || !handler) {
     return;
   }
-  if (typeof host.themeMedia.removeEventListener === "function") {
-    host.themeMedia.removeEventListener("change", host.themeMediaHandler);
-    return;
-  }
-  const legacy = host.themeMedia as MediaQueryList & {
-    removeListener: (cb: (event: MediaQueryListEvent) => void) => void;
-  };
-  legacy.removeListener(host.themeMediaHandler);
   host.themeMedia = null;
   host.themeMediaHandler = null;
+  if (typeof media.removeEventListener === "function") {
+    media.removeEventListener("change", handler);
+    return;
+  }
+  const legacy = media as MediaQueryList & {
+    removeListener: (cb: (event: MediaQueryListEvent) => void) => void;
+  };
+  legacy.removeListener(handler);
 }
 
 export function syncTabWithLocation(host: SettingsHost, replace: boolean) {

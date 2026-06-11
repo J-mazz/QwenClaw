@@ -134,13 +134,14 @@ describe("message-normalizer", () => {
       expect(normalizeRoleForGrouping("Function")).toBe("tool");
     });
 
-    it("preserves user role", () => {
+    it("normalizes user role casing", () => {
       expect(normalizeRoleForGrouping("user")).toBe("user");
-      expect(normalizeRoleForGrouping("User")).toBe("User");
+      expect(normalizeRoleForGrouping("User")).toBe("user");
     });
 
     it("preserves assistant role", () => {
       expect(normalizeRoleForGrouping("assistant")).toBe("assistant");
+      expect(normalizeRoleForGrouping("Assistant")).toBe("assistant");
     });
 
     it("preserves system role", () => {

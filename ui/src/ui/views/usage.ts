@@ -276,6 +276,7 @@ export function renderUsage(props: UsageProps) {
   let displaySessionCount: number;
   const totalSessions = sortedSessions.length;
 
+  // Precedence: sessions > days-only (daily aggregates) > any other filter > all.
   if (props.selectedSessions.length > 0) {
     // Sessions selected - compute totals from selected sessions
     const selectedSessionEntries = filteredSessions.filter((s) =>
@@ -283,14 +284,13 @@ export function renderUsage(props: UsageProps) {
     );
     displayTotals = computeSessionTotals(selectedSessionEntries);
     displaySessionCount = selectedSessionEntries.length;
-  } else if (props.selectedDays.length > 0 && props.selectedHours.length === 0) {
-    // Days selected - use daily aggregates for accurate per-day totals
+  } else if (props.selectedDays.length > 0 && props.selectedHours.length === 0 && !hasQuery) {
+    // Days selected with no further narrowing - use daily aggregates for
+    // accurate per-day totals. With an hour or query filter active the daily
+    // aggregates would overcount, so fall through to session totals instead.
     displayTotals = computeDailyTotals(props.selectedDays);
     displaySessionCount = filteredSessions.length;
-  } else if (props.selectedHours.length > 0) {
-    displayTotals = computeSessionTotals(filteredSessions);
-    displaySessionCount = filteredSessions.length;
-  } else if (hasQuery) {
+  } else if (props.selectedDays.length > 0 || props.selectedHours.length > 0 || hasQuery) {
     displayTotals = computeSessionTotals(filteredSessions);
     displaySessionCount = filteredSessions.length;
   } else {

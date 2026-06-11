@@ -13,6 +13,7 @@ export type DebugState = {
   debugCallParams: string;
   debugCallResult: string | null;
   debugCallError: string | null;
+  debugLoadError: string | null;
 };
 
 export async function loadDebug(state: DebugState) {
@@ -35,8 +36,9 @@ export async function loadDebug(state: DebugState) {
     const modelPayload = models as { models?: unknown[] } | undefined;
     state.debugModels = Array.isArray(modelPayload?.models) ? modelPayload?.models : [];
     state.debugHeartbeat = heartbeat;
+    state.debugLoadError = null;
   } catch (err) {
-    state.debugCallError = String(err);
+    state.debugLoadError = String(err);
   } finally {
     state.debugLoading = false;
   }

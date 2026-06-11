@@ -351,6 +351,7 @@ export class QuantClawApp extends LitElement {
   @state() debugCallParams = "{}";
   @state() debugCallResult: string | null = null;
   @state() debugCallError: string | null = null;
+  @state() debugLoadError: string | null = null;
 
   @state() logsLoading = false;
   @state() logsError: string | null = null;
@@ -402,6 +403,10 @@ export class QuantClawApp extends LitElement {
   }
 
   disconnectedCallback() {
+    if (this.sidebarCloseTimer != null) {
+      window.clearTimeout(this.sidebarCloseTimer);
+      this.sidebarCloseTimer = null;
+    }
     handleDisconnected(this as unknown as Parameters<typeof handleDisconnected>[0]);
     super.disconnectedCallback();
   }

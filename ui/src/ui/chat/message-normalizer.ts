@@ -52,7 +52,7 @@ export function normalizeMessage(message: unknown): NormalizedMessage {
   const id = typeof m.id === "string" ? m.id : undefined;
 
   // Strip AI-injected metadata prefix blocks from user messages before display.
-  if (role === "user" || role === "User") {
+  if (role.toLowerCase() === "user") {
     content = content.map((item) => {
       if (item.type === "text" && typeof item.text === "string") {
         return { ...item, text: stripInboundMetadata(item.text) };
@@ -69,15 +69,9 @@ export function normalizeMessage(message: unknown): NormalizedMessage {
  */
 export function normalizeRoleForGrouping(role: string): string {
   const lower = role.toLowerCase();
-  // Preserve original casing when it's already a core role.
-  if (role === "user" || role === "User") {
-    return role;
-  }
-  if (role === "assistant") {
-    return "assistant";
-  }
-  if (role === "system") {
-    return "system";
+  // Normalize core roles to lowercase so grouping/styling is casing-insensitive.
+  if (lower === "user" || lower === "assistant" || lower === "system") {
+    return lower;
   }
   // Keep tool-related roles distinct so the UI can style/toggle them.
   if (
