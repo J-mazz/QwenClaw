@@ -5,6 +5,7 @@ module;
 
 #include <httplib.h>
 #include <spdlog/spdlog.h>
+#include <unistd.h>
 
 module quantclaw.tools.tool_registry;
 
@@ -296,9 +297,34 @@ void ToolRegistry::RegisterReconTools() {
   };
 
   // Helper: check if a binary is available on PATH.
+  // Scans $PATH in-process rather than shelling out to `which`: a subprocess
+  // here would inherit exec_capture's resource limits and, on a busy user
+  // account, can fail to fork — making every check stall its full timeout.
   auto has_binary = [](const std::string& name) -> bool {
-    auto r = platform::exec_capture("which " + name + " 2>/dev/null", 5);
-    return r.exit_code == 0 && !r.output.empty();
+    const char* path_env = std::getenv("PATH");
+    if (!path_env) {
+      return false;
+    }
+    std::string_view path(path_env);
+    for (std::size_t start = 0; start <= path.size();) {
+      std::size_t end = path.find(':', start);
+      std::string_view dir =
+          path.substr(start, end == std::string_view::npos ? std::string_view::npos
+                                                           : end - start);
+      if (!dir.empty()) {
+        std::error_code ec;
+        fs::path candidate = fs::path(dir) / name;
+        if (fs::is_regular_file(candidate, ec) &&
+            ::access(candidate.c_str(), X_OK) == 0) {
+          return true;
+        }
+      }
+      if (end == std::string_view::npos) {
+        break;
+      }
+      start = end + 1;
+    }
+    return false;
   };
 
   // --- 1. subdomain_enum ---

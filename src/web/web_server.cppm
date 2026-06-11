@@ -42,6 +42,12 @@ export class WebServer {
   // Mount a directory for static file serving
   void SetMountPoint(const std::string& mount, const std::string& dir);
 
+  // Set the interface address to bind on (e.g. "127.0.0.1" for loopback-only,
+  // "0.0.0.0" for all interfaces). Defaults to loopback for safety.
+  void SetBindHost(const std::string& host) {
+    bind_host_ = host;
+  }
+
   void Start();
   void Stop();
 
@@ -52,6 +58,7 @@ export class WebServer {
   };
 
   int port_;
+  std::string bind_host_ = "127.0.0.1";
   std::shared_ptr<spdlog::logger> logger_;
   std::atomic<bool> running_;
   std::unique_ptr<std::thread> server_thread_;

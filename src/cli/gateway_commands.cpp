@@ -48,6 +48,23 @@ import quantclaw.gateway.rpc_handlers;
 
 namespace quantclaw::cli {
 
+// Maps a config `gateway.bind` value to a concrete interface address.
+// Symbolic names resolve to loopback or all-interfaces; anything else is
+// treated as a literal address/hostname. Empty/unknown defaults to loopback
+// so a misconfiguration never silently exposes the gateway to the network.
+static std::string ResolveBindHost(const std::string& bind) {
+  std::string b;
+  b.reserve(bind.size());
+  for (char c : bind)
+    b.push_back(static_cast<char>(std::tolower(static_cast<unsigned char>(c))));
+
+  if (b.empty() || b == "loopback" || b == "localhost" || b == "local")
+    return "127.0.0.1";
+  if (b == "all" || b == "any" || b == "public" || b == "*" || b == "0.0.0.0")
+    return "0.0.0.0";
+  return bind;  // explicit address/hostname, e.g. "127.0.0.1" or "192.168.1.10"
+}
+
 // Removes *.log and spdlog rotated files (*.log.N) older than |days| days.
 // Called at gateway startup to prevent unbounded disk usage.
 // days == 0 disables pruning (keep forever).
@@ -199,6 +216,10 @@ int GatewayCommands::ForegroundCommand(const std::vector<std::string>& args) {
 
   // Create and configure gateway server
   gateway::GatewayServer server(port, logger_);
+
+  // Resolve the interface to bind on from config (loopback-only by default).
+  const std::string bind_host = ResolveBindHost(config.gateway.bind);
+  server.SetBindHost(bind_host);
 
   // Tell WS server to redirect plain HTTP requests to the Control UI port
   if (config.gateway.control_ui.enabled) {
@@ -487,7 +508,7 @@ int GatewayCommands::ForegroundCommand(const std::vector<std::string>& args) {
     return 1;
   }
 
-  logger_->info("Gateway running on ws://0.0.0.0:{}", port);
+  logger_->info("Gateway running on ws://{}:{}", bind_host, port);
 
   // Start HTTP API server (Control UI)
   std::unique_ptr<quantclaw::web::WebServer> http_server;
@@ -495,6 +516,7 @@ int GatewayCommands::ForegroundCommand(const std::vector<std::string>& args) {
     int http_port = config.gateway.control_ui.port;
     http_server =
         std::make_unique<quantclaw::web::WebServer>(http_port, logger_);
+    http_server->SetBindHost(bind_host);
     http_server->EnableCors("*");
 
     if (!auth_token.empty() && config.gateway.auth.mode == "token") {
@@ -558,7 +580,7 @@ int GatewayCommands::ForegroundCommand(const std::vector<std::string>& args) {
         });
 
     http_server->Start();
-    logger_->info("HTTP API running on http://0.0.0.0:{}", http_port);
+    logger_->info("HTTP API running on http://{}:{}", bind_host, http_port);
   }
 
   // Start channel adapters (Discord, Telegram, etc.)

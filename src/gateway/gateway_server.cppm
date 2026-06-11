@@ -131,6 +131,12 @@ class GatewayServer : public quantclaw::Noncopyable {
     http_redirect_port_ = port;
   }
 
+  // Set the interface address to bind on (e.g. "127.0.0.1" for loopback-only,
+  // "0.0.0.0" for all interfaces). Defaults to loopback for safety.
+  void SetBindHost(const std::string& host) {
+    bind_host_ = host;
+  }
+
   // Enable RBAC enforcement
   void SetRbac(std::shared_ptr<RBACChecker> checker) {
     rbac_checker_ = std::move(checker);
@@ -165,6 +171,9 @@ class GatewayServer : public quantclaw::Noncopyable {
 
   // HTTP redirect target (Control UI port)
   int http_redirect_port_ = 0;
+
+  // Interface to bind on; loopback-only by default.
+  std::string bind_host_ = "127.0.0.1";
 
   mutable std::mutex connections_mutex_;
   std::unordered_map<std::string, ClientConnection> connections_;

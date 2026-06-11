@@ -191,8 +191,8 @@ void WebServer::server_loop() {
     }
   }
 
-  logger_->info("HTTP server listening on 0.0.0.0:{}", port_);
-  http_server_->listen("0.0.0.0", port_);
+  logger_->info("HTTP server listening on {}:{}", bind_host_, port_);
+  http_server_->listen(bind_host_, port_);
 }
 
 std::string WebServer::create_error_response(const std::string& message,

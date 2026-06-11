@@ -170,10 +170,12 @@ ExecResult exec_capture(const std::string& command, int timeout_seconds,
     if (setrlimit(RLIMIT_FSIZE, &fsz_lim) != 0) {
       _exit(126);
     }
-    struct rlimit nproc_lim = {32, 64};
-    if (setrlimit(RLIMIT_NPROC, &nproc_lim) != 0) {
-      _exit(126);
-    }
+    // NOTE: RLIMIT_NPROC is intentionally NOT set here. It is a per-real-UID
+    // limit counting *every* process the user owns, not just this command's
+    // descendants. A small cap (e.g. 32) is exceeded on any normal interactive
+    // account, so /bin/sh cannot fork the target binary and spins on EAGAIN
+    // until the caller's timeout fires. Capping subprocess fan-out needs a
+    // per-process-tree mechanism (cgroup pids controller), not RLIMIT_NPROC.
 #endif
 
     execl("/bin/sh", "sh", "-c", command.c_str(), nullptr);

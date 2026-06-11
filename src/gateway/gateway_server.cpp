@@ -32,7 +32,8 @@ void GatewayServer::Start() {
     return;
   }
 
-  auto ws_server = std::make_unique<HttpAwareWebSocketServer>(port_, "0.0.0.0");
+  auto ws_server =
+      std::make_unique<HttpAwareWebSocketServer>(port_, bind_host_);
   ws_server->setHttpRedirectPort(http_redirect_port_);
   server_ = std::move(ws_server);
 
@@ -54,7 +55,7 @@ void GatewayServer::Start() {
                         std::chrono::system_clock::now().time_since_epoch())
                         .count());
 
-  logger_->info("GatewayServer started on port {}", port_);
+  logger_->info("GatewayServer started on {}:{}", bind_host_, port_);
 }
 
 void GatewayServer::Stop() {
