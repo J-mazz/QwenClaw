@@ -77,3 +77,6 @@ refs/
 .claude/
 .codex/
 .codex*/
+
+# Graphify knowledge-graph output (regenerable via `graphify .`)
+graphify-out/
