@@ -150,6 +150,10 @@ AgentConfig AgentConfig::FromJson(const nlohmann::json& json) {
   config.thinking = json.value("thinking", "off");
   config.fallbacks = json.value("fallbacks", std::vector<std::string>{});
 
+  // Tools are opt-in (see AgentConfig::auto_attach_tools).
+  config.auto_attach_tools =
+      json.value("autoAttachTools", json.value("auto_attach_tools", false));
+
   // Compaction settings
   config.auto_compact =
       json.value("autoCompact", json.value("auto_compact", true));

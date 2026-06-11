@@ -298,23 +298,27 @@ std::vector<Message> AgentLoop::ProcessMessage(
   request.max_tokens = agent_config_.max_tokens;
   request.thinking = agent_config_.thinking;
 
-  // Add tool schemas
-  nlohmann::json tools_json = nlohmann::json::array();
-  for (const auto& schema : tool_registry_->GetToolSchemas()) {
-    nlohmann::json tool;
-    tool["type"] = "function";
-    tool["function"]["name"] = schema.name;
-    tool["function"]["description"] = schema.description;
-    auto params_json =
-        nlohmann::json::parse(schema.parameters_json, nullptr, false);
-    if (params_json.is_discarded()) {
-      params_json = nlohmann::json::object();
+  // Tools are opt-in (agent.autoAttachTools). When disabled, the model answers
+  // the query directly with no tool schemas attached — tool use is a separate,
+  // on-demand capability, not the default path.
+  if (agent_config_.auto_attach_tools) {
+    nlohmann::json tools_json = nlohmann::json::array();
+    for (const auto& schema : tool_registry_->GetToolSchemas()) {
+      nlohmann::json tool;
+      tool["type"] = "function";
+      tool["function"]["name"] = schema.name;
+      tool["function"]["description"] = schema.description;
+      auto params_json =
+          nlohmann::json::parse(schema.parameters_json, nullptr, false);
+      if (params_json.is_discarded()) {
+        params_json = nlohmann::json::object();
+      }
+      tool["function"]["parameters"] = std::move(params_json);
+      tools_json.push_back(tool);
     }
-    tool["function"]["parameters"] = std::move(params_json);
-    tools_json.push_back(tool);
+    request.tools = tools_json.get<std::vector<nlohmann::json>>();
+    request.tool_choice_auto = true;
   }
-  request.tools = tools_json.get<std::vector<nlohmann::json>>();
-  request.tool_choice_auto = true;
 
   // Save original model for failover re-resolution
   std::string original_model = agent_config_.model;
@@ -601,22 +605,25 @@ std::vector<Message> AgentLoop::ProcessMessageStream(
   request.stream = true;
   request.thinking = agent_config_.thinking;
 
-  nlohmann::json tools_json = nlohmann::json::array();
-  for (const auto& schema : tool_registry_->GetToolSchemas()) {
-    nlohmann::json tool;
-    tool["type"] = "function";
-    tool["function"]["name"] = schema.name;
-    tool["function"]["description"] = schema.description;
-    auto params_json =
-        nlohmann::json::parse(schema.parameters_json, nullptr, false);
-    if (params_json.is_discarded()) {
-      params_json = nlohmann::json::object();
+  // Tools are opt-in (agent.autoAttachTools) — see the non-streaming path.
+  if (agent_config_.auto_attach_tools) {
+    nlohmann::json tools_json = nlohmann::json::array();
+    for (const auto& schema : tool_registry_->GetToolSchemas()) {
+      nlohmann::json tool;
+      tool["type"] = "function";
+      tool["function"]["name"] = schema.name;
+      tool["function"]["description"] = schema.description;
+      auto params_json =
+          nlohmann::json::parse(schema.parameters_json, nullptr, false);
+      if (params_json.is_discarded()) {
+        params_json = nlohmann::json::object();
+      }
+      tool["function"]["parameters"] = std::move(params_json);
+      tools_json.push_back(tool);
     }
-    tool["function"]["parameters"] = std::move(params_json);
-    tools_json.push_back(tool);
+    request.tools = tools_json.get<std::vector<nlohmann::json>>();
+    request.tool_choice_auto = true;
   }
-  request.tools = tools_json.get<std::vector<nlohmann::json>>();
-  request.tool_choice_auto = true;
 
   std::string original_model_stream = agent_config_.model;
   int iterations = 0;
@@ -628,11 +635,14 @@ std::vector<Message> AgentLoop::ProcessMessageStream(
                                 max_iterations_, ctx_window, request.messages);
     try {
       std::string full_response;
+      std::string full_reasoning;     // reasoning-model "thinking" output
+      bool made_tool_call = false;    // did this turn invoke a tool?
       TokenUsage stream_usage;
 
       provider->ChatCompletionStream(
           request, [&](const ChatCompletionResponse& chunk) {
             if (!chunk.reasoning_content.empty()) {
+              full_reasoning += chunk.reasoning_content;
               if (callback) {
                 callback({events::kThinkingDelta,
                           {{"text", chunk.reasoning_content}}});
@@ -651,6 +661,7 @@ std::vector<Message> AgentLoop::ProcessMessageStream(
             stream_usage.completion_tokens += chunk.usage.completion_tokens;
 
             if (!chunk.tool_calls.empty()) {
+              made_tool_call = true;
               for (const auto& tc : chunk.tool_calls) {
                 if (dag_runtime_ && dag_runtime_->IsEnabled()) {
                   dag_runtime_->EmitNode(
@@ -777,7 +788,7 @@ std::vector<Message> AgentLoop::ProcessMessageStream(
                                           session_key_);
       }
 
-      // If we got a final response without tool calls, we're done
+      // If we got a final text response without tool calls, we're done.
       if (!full_response.empty()) {
         if (dag_runtime_ && dag_runtime_->IsEnabled()) {
           dag_runtime_->EmitNode(
@@ -789,6 +800,33 @@ std::vector<Message> AgentLoop::ProcessMessageStream(
         final_msg.role = "assistant";
         final_msg.content.push_back(ContentBlock::MakeText(full_response));
         new_messages.push_back(final_msg);
+        return new_messages;
+      }
+
+      // No assistant text and no tool call this turn — the model produced
+      // nothing actionable (e.g. a reasoning model whose answer landed in
+      // reasoning_content). Terminate instead of spinning to max_iterations;
+      // surface the reasoning as the answer so the turn isn't silent.
+      if (!made_tool_call) {
+        if (dag_runtime_ && dag_runtime_->IsEnabled()) {
+          dag_runtime_->EmitNode(
+              &dag_turn, DagNodeType::kTurnFinal,
+              nlohmann::json{{"contentSize", full_reasoning.size()},
+                             {"fromReasoning", true}});
+          dag_runtime_->EndTurn(&dag_turn, "completed");
+        }
+        if (!full_reasoning.empty()) {
+          if (callback) {
+            callback({events::kTextDelta, {{"text", full_reasoning}}});
+          }
+          Message final_msg;
+          final_msg.role = "assistant";
+          final_msg.content.push_back(ContentBlock::MakeText(full_reasoning));
+          new_messages.push_back(final_msg);
+        }
+        if (callback) {
+          callback({events::kMessageEnd, {{"content", full_reasoning}}});
+        }
         return new_messages;
       }
 

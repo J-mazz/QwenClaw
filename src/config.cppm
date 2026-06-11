@@ -22,6 +22,13 @@ export struct AgentConfig {
   std::string thinking = "off";        // "off" | "low" | "medium" | "high"
   std::vector<std::string> fallbacks;  // Model fallback chain
 
+  // Tool use is opt-in. When false (default), tool schemas are NOT attached to
+  // LLM requests: the agent answers the query directly and tools are a separate,
+  // on-demand capability rather than the default path. (Small models otherwise
+  // treat "call a tool" as the default action and loop to max_iterations.)
+  // Enable per-agent with `agent.autoAttachTools: true`.
+  bool auto_attach_tools = false;
+
   // Auto-compaction settings
   bool auto_compact = true;  // Enable automatic compaction
   int compact_max_messages =

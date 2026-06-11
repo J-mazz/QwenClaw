@@ -95,10 +95,19 @@ SerializeMessages(const std::vector<quantclaw::Message>& messages) {
 }
 
 // Translate QuantClaw tool definitions → OpenAI function-calling schema.
+// The agent loop already emits each tool in OpenAI shape
+// ({"type":"function","function":{name,description,parameters}}), so pass those
+// through untouched. Only a bare {name,description,parameters} object needs the
+// function envelope. Wrapping an already-wrapped spec double-nests "function"
+// and llama-server rejects it ("key 'name' not found").
 nlohmann::json ConvertTools(const std::vector<nlohmann::json>& qc_tools) {
   nlohmann::json out = nlohmann::json::array();
   for (const auto& t : qc_tools) {
-    out.push_back({{"type", "function"}, {"function", t}});
+    if (t.contains("type") && t.contains("function")) {
+      out.push_back(t);
+    } else {
+      out.push_back({{"type", "function"}, {"function", t}});
+    }
   }
   return out;
 }
