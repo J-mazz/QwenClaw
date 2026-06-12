@@ -91,7 +91,30 @@ SerializeMessages(const std::vector<quantclaw::Message>& messages) {
     arr.push_back(entry);
   }
 
-  return arr;
+  // Enforce the strict user/assistant alternation that chat templates such as
+  // Gemma require: drop empty text turns (e.g. a failed/blank assistant
+  // response) and merge consecutive same-role text messages. Tool-call and
+  // tool-result entries are left untouched. Without this, accumulated history
+  // can contain back-to-back user turns, which makes the model emit no content.
+  auto is_plain_text = [](const nlohmann::json& e) {
+    return e.contains("content") && e["content"].is_string() &&
+           !e.contains("tool_calls") && e.value("role", "") != "tool";
+  };
+  nlohmann::json out = nlohmann::json::array();
+  for (auto& e : arr) {
+    if (is_plain_text(e) && e["content"].get<std::string>().empty()) {
+      continue;  // drop empty text turn
+    }
+    if (is_plain_text(e) && !out.empty() && is_plain_text(out.back()) &&
+        out.back()["role"] == e["role"]) {
+      out.back()["content"] = out.back()["content"].get<std::string>() +
+                              "\n\n" + e["content"].get<std::string>();
+      continue;  // merge into previous same-role turn
+    }
+    out.push_back(std::move(e));
+  }
+
+  return out;
 }
 
 // Translate QuantClaw tool definitions → OpenAI function-calling schema.
@@ -230,7 +253,14 @@ struct StreamContext {
         return;
       }
 
-      if (choice.value("finish_reason", std::string{}) == "tool_calls") {
+      // NOTE: finish_reason is JSON null on every streaming delta until the
+      // final chunk. nlohmann's value(key, "") THROWS type_error converting
+      // null -> string, which the catch below swallowed — silently dropping
+      // every content/reasoning_content delta. Guard with an explicit
+      // string check instead.
+      if (choice.contains("finish_reason") &&
+          choice["finish_reason"].is_string() &&
+          choice["finish_reason"].get<std::string>() == "tool_calls") {
         flush_tool_calls();
         return;
       }
