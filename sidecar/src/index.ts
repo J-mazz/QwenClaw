@@ -20,7 +20,7 @@ import { HookDispatcher } from "./hook-dispatcher.js";
 import { seedBuiltinProviders } from "./local-provider.js";
 import { ToolExecutor } from "./tool-executor.js";
 import { createPluginRuntime } from "./plugin-runtime-shim.js";
-import { loadPlugins } from "./plugin-loader.js";
+import { loadPlugins, resetPluginLoaderCache } from "./plugin-loader.js";
 import type {
   HttpHandlerEntry,
   HttpRequest,
@@ -331,6 +331,79 @@ async function stopServices(): Promise<void> {
 }
 
 // ---------------------------------------------------------------------------
+// Plugin reload (SIGHUP)
+// ---------------------------------------------------------------------------
+
+let reloadInProgress = false;
+
+async function reloadPlugins(opts: {
+  tools: ToolExecutor;
+  hooks: HookDispatcher;
+  sdkShimPath: string;
+}): Promise<void> {
+  if (reloadInProgress) {
+    logger.warn("[reload] already in progress, ignoring");
+    return;
+  }
+  reloadInProgress = true;
+  logger.info("[reload] reloading plugins");
+
+  try {
+    // Stop running services and drop everything registered by plugins.
+    await stopServices();
+    opts.tools.clear();
+    opts.hooks.clear();
+    registries = {
+      tools: opts.tools,
+      hooks: opts.hooks,
+      httpHandlers: [],
+      httpRoutes: [],
+      channels: [],
+      services: [],
+      providers: [],
+      commands: [],
+      gatewayMethods: [],
+      cliEntries: [],
+    };
+    pluginRecords = [];
+
+    // Re-read config and re-import plugin modules from disk.
+    resetPluginLoaderCache();
+    const startupConfig = parseStartupConfig();
+    const config: Record<string, unknown> = {
+      workspace_dir: startupConfig.workspace_dir,
+      plugins: startupConfig.plugins,
+    };
+    const runtime = createPluginRuntime({
+      config,
+      workspaceDir: startupConfig.workspace_dir,
+      logger,
+    });
+
+    const loadResult = await loadPlugins({
+      startupConfig,
+      runtime,
+      logger,
+      registries,
+      sdkShimPath: opts.sdkShimPath,
+    });
+    pluginRecords = loadResult.records;
+    seedBuiltinProviders(registries, startupConfig);
+    await startServices(registries.services, config, startupConfig.workspace_dir);
+
+    logger.info(
+      `[reload] done: ${pluginRecords.length} plugins, ` +
+      `${opts.tools.toolNames().length} tools, ` +
+      `${opts.hooks.registeredHooks().length} hooks`,
+    );
+  } catch (err) {
+    logger.error(`[reload] failed: ${String(err)}`);
+  } finally {
+    reloadInProgress = false;
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Main
 // ---------------------------------------------------------------------------
 
@@ -426,8 +499,8 @@ async function main(): Promise<void> {
   });
 
   process.on("SIGHUP", () => {
-    logger.info("received SIGHUP, reload not yet implemented");
-    // TODO: reload plugins without stopping.
+    logger.info("received SIGHUP, reloading plugins");
+    void reloadPlugins({ tools, hooks, sdkShimPath });
   });
 
   process.on("uncaughtException", (err) => {

@@ -29,10 +29,19 @@ import {
 
 let jitiLoader: ReturnType<typeof createJiti> | null = null;
 
+/**
+ * Drop the cached jiti instance so the next plugin load re-imports modules
+ * from disk (used for SIGHUP plugin reload).
+ */
+export function resetPluginLoaderCache(): void {
+  jitiLoader = null;
+}
+
 function getJiti(sdkShimPath: string): ReturnType<typeof createJiti> {
   if (!jitiLoader) {
     jitiLoader = createJiti(import.meta.url, {
       interopDefault: true,
+      moduleCache: false,
       extensions: [
         ".ts", ".tsx", ".mts", ".cts",
         ".js", ".mjs", ".cjs", ".json",

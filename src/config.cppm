@@ -222,6 +222,7 @@ export struct SecurityConfig {
 
 export struct SkillEntryConfig {
   bool enabled = true;
+  std::string api_key;  // exported to the skill's primaryEnv at load time
   static SkillEntryConfig FromJson(const nlohmann::json& json);
 };
 

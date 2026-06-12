@@ -91,9 +91,14 @@ class SkillLoader {
   std::vector<SkillMetadata>
   LoadSkillsFromDirectory(const std::filesystem::path& skills_dir);
 
+  // Loads skills from workspace/user/extra directories, applying per-skill
+  // config (enabled flag, apiKey -> primaryEnv export) before gating.
+  // With include_all=true, disabled and gating-ineligible skills are kept
+  // (used by status/management views); otherwise both are filtered out.
   std::vector<SkillMetadata>
   LoadSkills(const SkillsConfig& skills_config,
-             const std::filesystem::path& workspace_path);
+             const std::filesystem::path& workspace_path,
+             bool include_all = false);
 
   bool CheckSkillGating(const SkillMetadata& skill);
   std::string GetSkillContext(const std::vector<SkillMetadata>& skills) const;
@@ -102,6 +107,10 @@ class SkillLoader {
   GetAllCommands(const std::vector<SkillMetadata>& skills) const;
 
  private:
+  std::vector<SkillMetadata>
+  parse_skills_in_directory(const std::filesystem::path& skills_dir) const;
+  void apply_config_env(const SkillsConfig& skills_config,
+                        const SkillMetadata& skill) const;
   SkillMetadata parse_skill_file(const std::filesystem::path& skill_file) const;
   nlohmann::json parse_yaml_frontmatter(const std::string& yaml_str) const;
   bool is_binary_available(const std::string& binary_name) const;

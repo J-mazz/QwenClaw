@@ -302,6 +302,7 @@ MCPConfig MCPConfig::FromJson(const nlohmann::json& json) {
 SkillEntryConfig SkillEntryConfig::FromJson(const nlohmann::json& json) {
   SkillEntryConfig config;
   config.enabled = json.value("enabled", true);
+  config.api_key = json.value("apiKey", "");
   return config;
 }
 

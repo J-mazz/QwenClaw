@@ -28,6 +28,11 @@ export class HookDispatcher {
     this.hooks.sort((a, b) => b.priority - a.priority);
   }
 
+  /** Remove all registered hooks (used for plugin reload). */
+  clear(): void {
+    this.hooks = [];
+  }
+
   /** Get the execution mode for a hook. Defaults to "void" for unknown hooks. */
   getMode(hookName: string): HookMode {
     return HOOK_MODES[hookName] ?? "void";

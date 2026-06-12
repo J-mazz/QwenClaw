@@ -15,6 +15,11 @@ export class ToolExecutor {
     this.tools.set(tool.name, { pluginId, tool });
   }
 
+  /** Remove all registered tools (used for plugin reload). */
+  clear(): void {
+    this.tools.clear();
+  }
+
   /** Check if a tool exists. */
   has(name: string): boolean {
     return this.tools.has(name);

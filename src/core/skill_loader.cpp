@@ -3,6 +3,8 @@
 
 module;
 
+#include <cstdlib>
+
 #include <spdlog/spdlog.h>
 
 module quantclaw.core.skill_loader;
@@ -19,8 +21,8 @@ SkillLoader::SkillLoader(std::shared_ptr<spdlog::logger> logger)
   logger_->info("SkillLoader initialized");
 }
 
-std::vector<SkillMetadata>
-SkillLoader::LoadSkillsFromDirectory(const std::filesystem::path& skills_dir) {
+std::vector<SkillMetadata> SkillLoader::parse_skills_in_directory(
+    const std::filesystem::path& skills_dir) const {
   std::vector<SkillMetadata> skills;
 
   if (!std::filesystem::exists(skills_dir)) {
@@ -28,23 +30,52 @@ SkillLoader::LoadSkillsFromDirectory(const std::filesystem::path& skills_dir) {
     return skills;
   }
 
-  logger_->info("Loading skills from: {}", skills_dir.string());
-
   for (const auto& entry :
        std::filesystem::recursive_directory_iterator(skills_dir)) {
     if (entry.is_regular_file() && entry.path().filename() == "SKILL.md") {
       try {
-        auto skill = parse_skill_file(entry.path());
-        if (CheckSkillGating(skill)) {
-          logger_->debug("Loaded skill: {}", skill.name);
-          skills.push_back(std::move(skill));
-        } else {
-          logger_->debug("Skipped skill (gating failed): {}", skill.name);
-        }
+        skills.push_back(parse_skill_file(entry.path()));
       } catch (const std::exception& e) {
         logger_->error("Failed to load skill from {}: {}",
                        entry.path().string(), e.what());
       }
+    }
+  }
+
+  return skills;
+}
+
+// Export a config-supplied API key as the skill's primary env var so that
+// env gating passes and skill tooling can read it. Existing process env
+// always wins over config.
+void SkillLoader::apply_config_env(const SkillsConfig& skills_config,
+                                   const SkillMetadata& skill) const {
+  if (skill.primary_env.empty()) {
+    return;
+  }
+  auto it = skills_config.entries.find(skill.name);
+  if (it == skills_config.entries.end() || it->second.api_key.empty()) {
+    return;
+  }
+  if (std::getenv(skill.primary_env.c_str()) != nullptr) {
+    return;
+  }
+  ::setenv(skill.primary_env.c_str(), it->second.api_key.c_str(), 0);
+  logger_->debug("Skill '{}': exported {} from config apiKey", skill.name,
+                 skill.primary_env);
+}
+
+std::vector<SkillMetadata>
+SkillLoader::LoadSkillsFromDirectory(const std::filesystem::path& skills_dir) {
+  logger_->info("Loading skills from: {}", skills_dir.string());
+
+  std::vector<SkillMetadata> skills;
+  for (auto& skill : parse_skills_in_directory(skills_dir)) {
+    if (CheckSkillGating(skill)) {
+      logger_->debug("Loaded skill: {}", skill.name);
+      skills.push_back(std::move(skill));
+    } else {
+      logger_->debug("Skipped skill (gating failed): {}", skill.name);
     }
   }
 
@@ -741,7 +772,8 @@ SkillLoader::parse_yaml_frontmatter(const std::string& yaml_str) const {
 
 std::vector<SkillMetadata>
 SkillLoader::LoadSkills(const SkillsConfig& skills_config,
-                        const std::filesystem::path& workspace_path) {
+                        const std::filesystem::path& workspace_path,
+                        bool include_all) {
   // Build ordered directory list: workspace > user > extraDirs
   std::vector<std::filesystem::path> dirs;
   dirs.push_back(workspace_path / "skills");
@@ -762,16 +794,27 @@ SkillLoader::LoadSkills(const SkillsConfig& skills_config,
   std::vector<SkillMetadata> result;
 
   for (const auto& dir : dirs) {
-    auto skills = LoadSkillsFromDirectory(dir);
-    for (auto& skill : skills) {
+    for (auto& skill : parse_skills_in_directory(dir)) {
       if (seen_names.count(skill.name))
         continue;
 
-      // Check per-skill disable
-      auto it = skills_config.entries.find(skill.name);
-      if (it != skills_config.entries.end() && !it->second.enabled) {
-        logger_->debug("Skill '{}' disabled via config", skill.name);
-        continue;
+      // Export config-supplied API keys before gating so env checks pass.
+      apply_config_env(skills_config, skill);
+
+      if (!include_all) {
+        // Check per-skill disable
+        auto it = skills_config.entries.find(skill.name);
+        if (it != skills_config.entries.end() && !it->second.enabled) {
+          logger_->debug("Skill '{}' disabled via config", skill.name);
+          seen_names.insert(skill.name);
+          continue;
+        }
+        // Leave gating-failed skills unmarked so a same-named skill from a
+        // lower-precedence directory can still load (matches prior behavior).
+        if (!CheckSkillGating(skill)) {
+          logger_->debug("Skipped skill (gating failed): {}", skill.name);
+          continue;
+        }
       }
 
       seen_names.insert(skill.name);

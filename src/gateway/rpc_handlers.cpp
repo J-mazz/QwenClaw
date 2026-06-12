@@ -3,6 +3,8 @@
 
 module;
 
+#include <cstdlib>
+
 #include <spdlog/spdlog.h>
 
 module quantclaw.gateway.rpc_handlers;
@@ -31,6 +33,633 @@ import quantclaw.tools.tool_chain;
 import quantclaw.tools.tool_registry;
 
 namespace quantclaw::gateway {
+
+namespace {
+
+// Stable FNV-1a 64-bit hash of the raw config text, rendered as 16 hex chars.
+// Serves as the optimistic-concurrency token for config.get/set/apply.
+std::string config_hash(const std::string& raw) {
+  std::uint64_t h = 1469598103934665603ULL;  // FNV-1a offset basis
+  for (unsigned char c : raw) {
+    h ^= c;
+    h *= 1099511628211ULL;  // FNV-1a prime
+  }
+  static const char* kHex = "0123456789abcdef";
+  std::string out(16, '0');
+  for (int i = 15; i >= 0; --i) {
+    out[i] = kHex[h & 0xF];
+    h >>= 4;
+  }
+  return out;
+}
+
+// Read the on-disk config file verbatim (preserving ${VAR} placeholders and
+// comments). Returns {raw, exists}.
+std::pair<std::string, bool> read_config_raw() {
+  auto path = QuantClawConfig::DefaultConfigPath();
+  std::error_code ec;
+  if (!std::filesystem::exists(path, ec)) {
+    return {std::string{}, false};
+  }
+  std::ifstream f(path, std::ios::binary);
+  std::ostringstream ss;
+  ss << f.rdbuf();
+  return {ss.str(), true};
+}
+
+// Build the ConfigSnapshot the UI expects:
+// { path, exists, raw, hash, parsed, valid, config, issues }.
+// The document is parsed WITHOUT ${VAR} expansion so secrets stay as
+// placeholders in the editor and round-trip safely on save.
+nlohmann::json build_config_snapshot() {
+  auto path = QuantClawConfig::DefaultConfigPath();
+  auto [raw, exists] = read_config_raw();
+
+  nlohmann::json parsed = nlohmann::json::object();
+  bool valid = true;
+  nlohmann::json issues = nlohmann::json::array();
+
+  if (exists) {
+    auto p = nlohmann::json::parse(raw, nullptr, /*allow_exceptions=*/false,
+                                   /*ignore_comments=*/true);
+    if (p.is_discarded()) {
+      valid = false;
+      issues.push_back(
+          {{"path", ""}, {"message", "Config file is not valid JSON"}});
+    } else {
+      parsed = std::move(p);
+    }
+  }
+
+  return {{"path", path},   {"exists", exists}, {"raw", raw},
+          {"hash", config_hash(raw)},
+          {"parsed", parsed}, {"valid", valid},  {"config", parsed},
+          {"issues", issues}};
+}
+
+// Validate + optimistic-concurrency check + backup + atomically replace the
+// full config document. Throws std::runtime_error on invalid JSON or a hash
+// conflict (file changed since the client last loaded it).
+void write_config_document(const std::string& raw,
+                           const std::string& base_hash) {
+  auto parsed = nlohmann::json::parse(raw, nullptr, /*allow_exceptions=*/false,
+                                      /*ignore_comments=*/true);
+  if (parsed.is_discarded()) {
+    throw std::runtime_error("config: submitted document is not valid JSON");
+  }
+
+  auto [current_raw, exists] = read_config_raw();
+  if (!base_hash.empty() && config_hash(current_raw) != base_hash) {
+    throw std::runtime_error(
+        "config conflict: file changed since last load; reload and retry");
+  }
+
+  auto config_file = QuantClawConfig::DefaultConfigPath();
+  std::error_code ec;
+  if (exists) {
+    std::filesystem::copy_file(
+        config_file, config_file + ".bak",
+        std::filesystem::copy_options::overwrite_existing, ec);
+  }
+  std::ofstream out(config_file, std::ios::binary | std::ios::trunc);
+  if (!out) {
+    throw std::runtime_error("config: cannot write " + config_file);
+  }
+  out << raw;
+}
+
+// Read-modify-write a single skills.entries.<name> entry in the on-disk
+// config document, backing up the previous file. Comments are not preserved
+// (the document is re-serialized).
+void persist_skill_entry(const std::string& skill_name,
+                         const std::optional<bool>& enabled,
+                         const std::optional<std::string>& api_key) {
+  auto [raw, exists] = read_config_raw();
+  nlohmann::json doc = nlohmann::json::object();
+  if (exists) {
+    auto p = nlohmann::json::parse(raw, nullptr, /*allow_exceptions=*/false,
+                                   /*ignore_comments=*/true);
+    if (p.is_discarded()) {
+      throw std::runtime_error(
+          "config: file is not valid JSON; fix it before updating skills");
+    }
+    doc = std::move(p);
+  }
+
+  if (!doc.is_object()) {
+    doc = nlohmann::json::object();
+  }
+  auto& entry = doc["skills"]["entries"][skill_name];
+  if (!entry.is_object()) {
+    entry = nlohmann::json::object();
+  }
+  if (enabled.has_value()) {
+    entry["enabled"] = *enabled;
+  }
+  if (api_key.has_value()) {
+    if (api_key->empty()) {
+      entry.erase("apiKey");
+    } else {
+      entry["apiKey"] = *api_key;
+    }
+  }
+
+  auto config_file = QuantClawConfig::DefaultConfigPath();
+  std::error_code ec;
+  if (exists) {
+    std::filesystem::copy_file(
+        config_file, config_file + ".bak",
+        std::filesystem::copy_options::overwrite_existing, ec);
+  } else {
+    std::filesystem::create_directories(
+        std::filesystem::path(config_file).parent_path(), ec);
+  }
+  std::ofstream out(config_file, std::ios::binary | std::ios::trunc);
+  if (!out) {
+    throw std::runtime_error("config: cannot write " + config_file);
+  }
+  out << doc.dump(2) << "\n";
+}
+
+// ---------------------------------------------------------------------------
+// Usage / metrics engine — token accounting only (no $$ cost tracking).
+// All cost fields are reported as 0 to satisfy the UI's shapes.
+// ---------------------------------------------------------------------------
+
+// Token totals in the UI's SessionsUsageTotals shape; costs always zero.
+struct UsageTotals {
+  long long input = 0;
+  long long output = 0;
+  nlohmann::json ToJson() const {
+    return {{"input", input},
+            {"output", output},
+            {"cacheRead", 0},
+            {"cacheWrite", 0},
+            {"totalTokens", input + output},
+            {"totalCost", 0.0},
+            {"inputCost", 0.0},
+            {"outputCost", 0.0},
+            {"cacheReadCost", 0.0},
+            {"cacheWriteCost", 0.0},
+            {"missingCostEntries", 0}};
+  }
+};
+
+std::string usage_date(const std::string& ts) {
+  return ts.size() >= 10 ? ts.substr(0, 10) : ts;
+}
+
+// ISO-8601 "YYYY-MM-DDThh:mm:ssZ" -> epoch milliseconds (UTC) via
+// days-from-civil; returns 0 if unparseable.
+long long usage_iso_to_ms(const std::string& ts) {
+  int y = 0, mo = 0, d = 0, h = 0, mi = 0, s = 0;
+  if (std::sscanf(ts.c_str(), "%d-%d-%dT%d:%d:%d", &y, &mo, &d, &h, &mi, &s) <
+      3) {
+    return 0;
+  }
+  y -= (mo <= 2);
+  long long era = (y >= 0 ? y : y - 399) / 400;
+  long long yoe = y - era * 400;
+  long long doy = (153 * (mo + (mo > 2 ? -3 : 9)) + 2) / 5 + d - 1;
+  long long doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+  long long days = era * 146097 + doe - 719468;
+  return (days * 86400 + h * 3600 + mi * 60 + s) * 1000;
+}
+
+std::string usage_provider_of(const std::string& model) {
+  auto slash = model.find('/');
+  return slash == std::string::npos ? model : model.substr(0, slash);
+}
+
+// agent id from a session key like "agent:<id>:<...>".
+std::string usage_agent_of(const std::string& key) {
+  if (key.rfind("agent:", 0) == 0) {
+    auto rest = key.substr(6);
+    auto colon = rest.find(':');
+    return colon == std::string::npos ? rest : rest.substr(0, colon);
+  }
+  return "main";
+}
+
+bool usage_in_range(const std::string& date, const std::string& start,
+                    const std::string& end) {
+  if (!start.empty() && date < start) return false;
+  if (!end.empty() && date > end) return false;
+  return true;
+}
+
+bool usage_is_error_result(const std::string& content) {
+  return content.rfind("Error", 0) == 0 ||
+         content.rfind("JSON serialization error", 0) == 0;
+}
+
+long long usage_now_ms() {
+  return std::chrono::duration_cast<std::chrono::milliseconds>(
+             std::chrono::system_clock::now().time_since_epoch())
+      .count();
+}
+
+// Full SessionsUsageResult aggregated from every session's transcript.
+// NOTE: model is not stored per-message, so token usage is attributed to the
+// agent's currently-configured model for the by-model/by-provider breakdowns.
+nlohmann::json compute_sessions_usage(quantclaw::SessionManager& sm,
+                                      const quantclaw::QuantClawConfig& config,
+                                      const std::string& start,
+                                      const std::string& end) {
+  const std::string model = config.agent.model;
+  const std::string provider = usage_provider_of(model);
+
+  UsageTotals totals;
+  long long m_total = 0, m_user = 0, m_assistant = 0, m_toolcalls = 0,
+            m_toolresults = 0, m_errors = 0;
+  std::map<std::string, long long> tool_counts;
+
+  struct Group {
+    UsageTotals t;
+    long long count = 0;
+  };
+  Group model_group, provider_group;
+  std::map<std::string, Group> by_agent, by_channel;
+
+  struct DailyAcc {
+    long long input = 0, output = 0, messages = 0, toolcalls = 0, errors = 0;
+  };
+  std::map<std::string, DailyAcc> daily;
+
+  nlohmann::json sessions_json = nlohmann::json::array();
+
+  for (const auto& s : sm.ListSessions()) {
+    const std::string agent = usage_agent_of(s.session_key);
+    const std::string channel = s.channel.empty() ? "cli" : s.channel;
+
+    UsageTotals s_tot;
+    long long s_total = 0, s_user = 0, s_assistant = 0, s_toolcalls = 0,
+              s_toolresults = 0, s_errors = 0;
+    std::map<std::string, long long> s_tools;
+
+    for (const auto& msg : sm.GetHistory(s.session_key, -1)) {
+      const std::string date = usage_date(msg.timestamp);
+      if (!usage_in_range(date, start, end)) continue;
+
+      m_total++;
+      s_total++;
+      if (msg.role == "assistant") {
+        m_assistant++;
+        s_assistant++;
+      } else if (msg.role == "user") {
+        m_user++;
+        s_user++;
+      }
+
+      for (const auto& b : msg.content) {
+        if (b.type == "tool_use") {
+          m_toolcalls++;
+          s_toolcalls++;
+          tool_counts[b.name]++;
+          s_tools[b.name]++;
+          daily[date].toolcalls++;
+        } else if (b.type == "tool_result") {
+          m_toolresults++;
+          s_toolresults++;
+          if (usage_is_error_result(b.content)) {
+            m_errors++;
+            s_errors++;
+            daily[date].errors++;
+          }
+        }
+      }
+      daily[date].messages++;
+
+      if (msg.usage) {
+        long long in = msg.usage->input_tokens;
+        long long out = msg.usage->output_tokens;
+        totals.input += in;
+        totals.output += out;
+        s_tot.input += in;
+        s_tot.output += out;
+        model_group.t.input += in;
+        model_group.t.output += out;
+        model_group.count++;
+        provider_group.t.input += in;
+        provider_group.t.output += out;
+        provider_group.count++;
+        by_agent[agent].t.input += in;
+        by_agent[agent].t.output += out;
+        by_agent[agent].count++;
+        by_channel[channel].t.input += in;
+        by_channel[channel].t.output += out;
+        by_channel[channel].count++;
+        daily[date].input += in;
+        daily[date].output += out;
+      }
+    }
+
+    nlohmann::json s_tool_arr = nlohmann::json::array();
+    for (const auto& [name, c] : s_tools) {
+      s_tool_arr.push_back({{"name", name}, {"count", c}});
+    }
+
+    nlohmann::json usage_obj = s_tot.ToJson();
+    usage_obj["messageCounts"] = {
+        {"total", s_total},          {"user", s_user},
+        {"assistant", s_assistant},  {"toolCalls", s_toolcalls},
+        {"toolResults", s_toolresults}, {"errors", s_errors}};
+    usage_obj["toolUsage"] = {{"totalCalls", s_toolcalls},
+                              {"uniqueTools",
+                               static_cast<long long>(s_tools.size())},
+                              {"tools", s_tool_arr}};
+
+    sessions_json.push_back({{"key", s.session_key},
+                             {"label", s.display_name},
+                             {"sessionId", s.session_id},
+                             {"agentId", agent},
+                             {"channel", channel},
+                             {"model", model},
+                             {"modelProvider", provider},
+                             {"usage", usage_obj}});
+  }
+
+  nlohmann::json tools_arr = nlohmann::json::array();
+  for (const auto& [name, c] : tool_counts) {
+    tools_arr.push_back({{"name", name}, {"count", c}});
+  }
+
+  bool any_tokens = totals.input > 0 || totals.output > 0;
+  nlohmann::json by_model_arr = nlohmann::json::array();
+  nlohmann::json by_provider_arr = nlohmann::json::array();
+  if (any_tokens) {
+    by_model_arr.push_back({{"provider", provider},
+                            {"model", model},
+                            {"count", model_group.count},
+                            {"totals", model_group.t.ToJson()}});
+    by_provider_arr.push_back({{"provider", provider},
+                              {"model", model},
+                              {"count", provider_group.count},
+                              {"totals", provider_group.t.ToJson()}});
+  }
+
+  nlohmann::json by_agent_arr = nlohmann::json::array();
+  for (const auto& [a, g] : by_agent) {
+    by_agent_arr.push_back({{"agentId", a}, {"totals", g.t.ToJson()}});
+  }
+  nlohmann::json by_channel_arr = nlohmann::json::array();
+  for (const auto& [c, g] : by_channel) {
+    by_channel_arr.push_back({{"channel", c}, {"totals", g.t.ToJson()}});
+  }
+
+  nlohmann::json daily_arr = nlohmann::json::array();
+  for (const auto& [date, a] : daily) {
+    daily_arr.push_back({{"date", date},
+                         {"tokens", a.input + a.output},
+                         {"cost", 0.0},
+                         {"messages", a.messages},
+                         {"toolCalls", a.toolcalls},
+                         {"errors", a.errors}});
+  }
+
+  return {{"updatedAt", usage_now_ms()},
+          {"startDate", start},
+          {"endDate", end},
+          {"sessions", sessions_json},
+          {"totals", totals.ToJson()},
+          {"aggregates",
+           {{"messages",
+             {{"total", m_total},
+              {"user", m_user},
+              {"assistant", m_assistant},
+              {"toolCalls", m_toolcalls},
+              {"toolResults", m_toolresults},
+              {"errors", m_errors}}},
+            {"tools",
+             {{"totalCalls", m_toolcalls},
+              {"uniqueTools", static_cast<long long>(tool_counts.size())},
+              {"tools", tools_arr}}},
+            {"byModel", by_model_arr},
+            {"byProvider", by_provider_arr},
+            {"byAgent", by_agent_arr},
+            {"byChannel", by_channel_arr},
+            {"daily", daily_arr}}}};
+}
+
+// CostUsageSummary shape: daily token totals + grand totals (costs zero).
+nlohmann::json compute_usage_cost(quantclaw::SessionManager& sm,
+                                  const std::string& start,
+                                  const std::string& end) {
+  std::map<std::string, UsageTotals> daily;
+  UsageTotals totals;
+  for (const auto& s : sm.ListSessions()) {
+    for (const auto& msg : sm.GetHistory(s.session_key, -1)) {
+      if (!msg.usage) continue;
+      const std::string date = usage_date(msg.timestamp);
+      if (!usage_in_range(date, start, end)) continue;
+      daily[date].input += msg.usage->input_tokens;
+      daily[date].output += msg.usage->output_tokens;
+      totals.input += msg.usage->input_tokens;
+      totals.output += msg.usage->output_tokens;
+    }
+  }
+  nlohmann::json daily_arr = nlohmann::json::array();
+  for (const auto& [date, t] : daily) {
+    nlohmann::json e = t.ToJson();
+    e["date"] = date;
+    daily_arr.push_back(std::move(e));
+  }
+  return {{"updatedAt", usage_now_ms()},
+          {"days", static_cast<long long>(daily.size())},
+          {"daily", daily_arr},
+          {"totals", totals.ToJson()}};
+}
+
+// Per-message token timeseries for one session (cumulative running totals).
+nlohmann::json compute_session_timeseries(quantclaw::SessionManager& sm,
+                                          const std::string& key) {
+  nlohmann::json points = nlohmann::json::array();
+  long long cum = 0;
+  for (const auto& msg : sm.GetHistory(key, -1)) {
+    if (!msg.usage) continue;
+    long long in = msg.usage->input_tokens;
+    long long out = msg.usage->output_tokens;
+    if (in == 0 && out == 0) continue;
+    cum += in + out;
+    points.push_back({{"timestamp", usage_iso_to_ms(msg.timestamp)},
+                      {"input", in},
+                      {"output", out},
+                      {"cacheRead", 0},
+                      {"cacheWrite", 0},
+                      {"totalTokens", in + out},
+                      {"cost", 0.0},
+                      {"cumulativeTokens", cum},
+                      {"cumulativeCost", 0.0}});
+  }
+  return {{"sessionId", key}, {"points", points}};
+}
+
+// Per-message transcript log for one session (SessionLogEntry shape).
+nlohmann::json compute_session_logs(quantclaw::SessionManager& sm,
+                                    const std::string& key, long long limit) {
+  nlohmann::json logs = nlohmann::json::array();
+  for (const auto& msg : sm.GetHistory(key, -1)) {
+    if (limit > 0 && static_cast<long long>(logs.size()) >= limit) break;
+
+    std::string text;
+    bool has_tool_result = false;
+    auto append = [&](const std::string& piece) {
+      if (!text.empty()) text += "\n";
+      text += piece;
+    };
+    for (const auto& b : msg.content) {
+      if (b.type == "text" || b.type == "thinking") {
+        append(b.text);
+      } else if (b.type == "tool_use") {
+        append("\xF0\x9F\x94\xA7 " + b.name + "(" + b.input.dump() + ")");
+      } else if (b.type == "tool_result") {
+        has_tool_result = true;
+        append(b.content);
+      }
+    }
+
+    std::string role = has_tool_result
+                           ? "toolResult"
+                           : (msg.role == "assistant" ? "assistant" : "user");
+    long long toks = msg.usage ? static_cast<long long>(
+                                     msg.usage->input_tokens +
+                                     msg.usage->output_tokens)
+                               : 0;
+    if (text.size() > 4000) text = text.substr(0, 4000) + "\xE2\x80\xA6";
+
+    logs.push_back({{"timestamp", usage_iso_to_ms(msg.timestamp)},
+                    {"role", role},
+                    {"content", text},
+                    {"tokens", toks},
+                    {"cost", 0.0}});
+  }
+  return {{"logs", logs}};
+}
+
+// ---------------------------------------------------------------------------
+// Agent workspace files (SOUL.md / AGENTS.md / MEMORY.md / ...): list/get/set
+// for the dashboard's "edit core instructions" panel.
+// ---------------------------------------------------------------------------
+
+std::string agent_workspace_dir(const std::string& agent_id) {
+  const char* home = std::getenv("HOME");
+  std::string h = home ? home : "/tmp";
+  std::string id = agent_id.empty() ? "main" : agent_id;
+  return h + "/.quantclaw/agents/" + id + "/workspace";
+}
+
+// Core context files the editor always surfaces (missing=true if absent).
+const std::vector<std::string>& agent_core_files() {
+  static const std::vector<std::string> files = {
+      "SOUL.md",  "IDENTITY.md", "AGENTS.md", "MEMORY.md",
+      "USER.md",  "SKILL.md",    "TOOLS.md",  "HEARTBEAT.md"};
+  return files;
+}
+
+// Only a bare filename is allowed (no traversal, no subdirs).
+bool agent_file_name_ok(const std::string& name) {
+  return !name.empty() && name.size() < 128 &&
+         name.find('/') == std::string::npos &&
+         name.find("..") == std::string::npos && name != ".";
+}
+
+nlohmann::json agent_file_entry(const std::string& dir, const std::string& name,
+                                bool include_content) {
+  std::filesystem::path p = std::filesystem::path(dir) / name;
+  std::error_code ec;
+  bool exists = std::filesystem::is_regular_file(p, ec);
+  nlohmann::json e = {
+      {"name", name}, {"path", p.string()}, {"missing", !exists}};
+  if (exists) {
+    e["size"] = static_cast<long long>(std::filesystem::file_size(p, ec));
+    auto ftime = std::filesystem::last_write_time(p, ec);
+    auto sctp = std::chrono::time_point_cast<std::chrono::system_clock::duration>(
+        ftime - std::filesystem::file_time_type::clock::now() +
+        std::chrono::system_clock::now());
+    e["updatedAtMs"] = std::chrono::duration_cast<std::chrono::milliseconds>(
+                           sctp.time_since_epoch())
+                           .count();
+    if (include_content) {
+      std::ifstream f(p, std::ios::binary);
+      std::ostringstream ss;
+      ss << f.rdbuf();
+      e["content"] = ss.str();
+    }
+  } else if (include_content) {
+    e["content"] = "";
+  }
+  return e;
+}
+
+// ---------------------------------------------------------------------------
+// Exec-approvals editor — dedicated ~/.quantclaw/exec-approvals.json document
+// with the same {path, exists, hash, file} snapshot + optimistic-concurrency
+// pattern as the main config.
+// ---------------------------------------------------------------------------
+
+std::string exec_approvals_path() {
+  const char* home = std::getenv("HOME");
+  std::string h = home ? home : "/tmp";
+  return h + "/.quantclaw/exec-approvals.json";
+}
+
+nlohmann::json build_exec_approvals_snapshot() {
+  auto path = exec_approvals_path();
+  std::error_code ec;
+  bool exists = std::filesystem::exists(path, ec);
+  std::string raw;
+  nlohmann::json file;
+  if (exists) {
+    std::ifstream f(path, std::ios::binary);
+    std::ostringstream ss;
+    ss << f.rdbuf();
+    raw = ss.str();
+    auto p = nlohmann::json::parse(raw, nullptr, /*allow_exceptions=*/false,
+                                   /*ignore_comments=*/true);
+    file = p.is_discarded() ? nlohmann::json::object() : p;
+  } else {
+    file = {{"version", 1},
+            {"defaults",
+             {{"ask", "on-miss"}, {"allowlist", nlohmann::json::array()}}},
+            {"agents", nlohmann::json::object()}};
+    raw = file.dump(2);
+  }
+  return {{"path", path},
+          {"exists", exists},
+          {"hash", config_hash(raw)},
+          {"file", file}};
+}
+
+void write_exec_approvals(const nlohmann::json& file,
+                          const std::string& base_hash) {
+  auto path = exec_approvals_path();
+  std::error_code ec;
+  bool exists = std::filesystem::exists(path, ec);
+  if (exists && !base_hash.empty()) {
+    std::ifstream f(path, std::ios::binary);
+    std::ostringstream ss;
+    ss << f.rdbuf();
+    if (config_hash(ss.str()) != base_hash) {
+      throw std::runtime_error(
+          "exec-approvals conflict: file changed since last load; reload and "
+          "retry");
+    }
+  }
+  std::filesystem::create_directories(std::filesystem::path(path).parent_path(),
+                                      ec);
+  if (exists) {
+    std::filesystem::copy_file(
+        path, path + ".bak",
+        std::filesystem::copy_options::overwrite_existing, ec);
+  }
+  std::ofstream out(path, std::ios::binary | std::ios::trunc);
+  if (!out) {
+    throw std::runtime_error("exec-approvals: cannot write " + path);
+  }
+  out << file.dump(2) << "\n";
+}
+
+}  // namespace
 
 void register_rpc_handlers(
     GatewayServer& server,
@@ -71,27 +700,20 @@ void register_rpc_handlers(
                          });
 
   // --- config.get ---
+  // No path  -> full ConfigSnapshot { path, exists, raw, hash, parsed, valid,
+  //             config, issues } read from the on-disk document.
+  // With path -> dot-path value lookup (CLI `config get <path>`). Well-known
+  //              paths resolve from the live in-memory config; anything else
+  //              falls back to the on-disk document.
   server.RegisterHandler(
       methods::kConfigGet,
-      [&config, logger](const nlohmann::json& params,
-                        ClientConnection& /*client*/) -> nlohmann::json {
+      [&config](const nlohmann::json& params,
+                ClientConnection& /*client*/) -> nlohmann::json {
         std::string path_param = params.value("path", "");
 
-        // Build the full config object that the UI config form expects
-        nlohmann::json full_config = {
-            {"agent",
-             {{"model", config.agent.model},
-              {"maxIterations", config.agent.max_iterations},
-              {"temperature", config.agent.temperature},
-              {"maxTokens", config.agent.max_tokens},
-              {"contextWindow", config.agent.context_window},
-              {"thinking", config.agent.thinking},
-              {"autoCompact", config.agent.auto_compact}}},
-            {"gateway",
-             {{"port", config.gateway.port}, {"bind", config.gateway.bind}}}};
-
         if (!path_param.empty()) {
-          // Dot-path lookup for legacy callers
+          // Live values first: these reflect the running process even when
+          // the gateway was configured programmatically (tests, embedding).
           if (path_param == "gateway.port")
             return config.gateway.port;
           if (path_param == "gateway.bind")
@@ -102,25 +724,57 @@ void register_rpc_handlers(
             return config.agent.max_iterations;
           if (path_param == "agent.temperature")
             return config.agent.temperature;
-          throw std::runtime_error("Unknown config path: " + path_param);
+          if (path_param == "agent.maxTokens")
+            return config.agent.max_tokens;
+          if (path_param == "agent.thinking")
+            return config.agent.thinking;
+
+          auto [raw, exists] = read_config_raw();
+          auto doc = exists ? nlohmann::json::parse(raw, nullptr, false, true)
+                            : nlohmann::json::object();
+          if (doc.is_discarded()) {
+            throw std::runtime_error("Config file is not valid JSON");
+          }
+          const nlohmann::json* cur = &doc;
+          std::size_t start = 0;
+          while (true) {
+            auto dot = path_param.find('.', start);
+            std::string key = path_param.substr(
+                start,
+                dot == std::string::npos ? std::string::npos : dot - start);
+            if (!cur->is_object() || !cur->contains(key)) {
+              throw std::runtime_error("Unknown config path: " + path_param);
+            }
+            cur = &(*cur)[key];
+            if (dot == std::string::npos) {
+              break;
+            }
+            start = dot + 1;
+          }
+          return *cur;
         }
 
-        // Return ConfigSnapshot shape expected by the UI
-        auto config_path = QuantClawConfig::DefaultConfigPath();
-        bool exists = std::filesystem::exists(config_path);
-        std::string raw_str = full_config.dump(2);
-
-        return {{"path", config_path},   {"exists", exists},
-                {"raw", raw_str},        {"hash", ""},
-                {"parsed", full_config}, {"valid", true},
-                {"config", full_config}, {"issues", nlohmann::json::array()}};
+        return build_config_snapshot();
       });
 
   // --- config.set ---
+  // UI contract: { raw, baseHash } -> validate, optimistic-concurrency check,
+  // back up, replace the whole document, hot-reload, return the new snapshot.
+  // Legacy:      { path, value }   -> dot-path single-key write (CLI).
   server.RegisterHandler(
       methods::kConfigSet,
       [logger, reload_fn](const nlohmann::json& params,
                           ClientConnection& /*client*/) -> nlohmann::json {
+        if (params.contains("raw")) {
+          write_config_document(params.value("raw", ""),
+                                params.value("baseHash", ""));
+          if (reload_fn) {
+            reload_fn();
+          }
+          logger->info("config.set: document replaced and reloaded");
+          return build_config_snapshot();
+        }
+
         std::string path = params.value("path", "");
         if (path.empty()) {
           throw std::runtime_error("path is required");
@@ -131,12 +785,9 @@ void register_rpc_handlers(
 
         auto config_file = QuantClawConfig::DefaultConfigPath();
         QuantClawConfig::SetValue(config_file, path, params["value"]);
-
-        // Trigger hot-reload so the running server picks up the change
         if (reload_fn) {
           reload_fn();
         }
-
         return {{"ok", true}, {"path", path}};
       });
 
@@ -567,18 +1218,218 @@ void register_rpc_handlers(
         return quantclaw::ToolChainExecutor::ResultToJson(result);
       });
 
-  // --- config.reload / config.apply (OpenClaw alias) ---
+  // --- config.reload (pure hot-reload, no document change) ---
   if (reload_fn) {
-    auto reload_handler =
-        [reload_fn, logger](const nlohmann::json& /*params*/,
-                            ClientConnection& /*client*/) -> nlohmann::json {
-      reload_fn();
-      return {{"ok", true}};
-    };
-    server.RegisterHandler(methods::kConfigReload, reload_handler);
-    // OpenClaw clients use "config.apply" for hot-reload
-    server.RegisterHandler("config.apply", reload_handler);
+    server.RegisterHandler(
+        methods::kConfigReload,
+        [reload_fn](const nlohmann::json& /*params*/,
+                    ClientConnection& /*client*/) -> nlohmann::json {
+          reload_fn();
+          return {{"ok", true}};
+        });
   }
+
+  // --- config.apply ---
+  // UI contract: { raw, baseHash, sessionKey? } -> write the document then
+  // hot-reload. With no `raw` it degrades to a pure reload (OpenClaw alias).
+  server.RegisterHandler(
+      "config.apply",
+      [reload_fn, logger](const nlohmann::json& params,
+                          ClientConnection& /*client*/) -> nlohmann::json {
+        if (params.contains("raw")) {
+          write_config_document(params.value("raw", ""),
+                                params.value("baseHash", ""));
+          logger->info("config.apply: document replaced");
+        }
+        if (reload_fn) {
+          reload_fn();
+        }
+        return build_config_snapshot();
+      });
+
+  // --- agents.files.list ---
+  // List the agent's workspace context files (SOUL.md, AGENTS.md, ...).
+  server.RegisterHandler(
+      "agents.files.list",
+      [](const nlohmann::json& params,
+         ClientConnection& /*client*/) -> nlohmann::json {
+        std::string agent_id = params.value("agentId", "main");
+        std::string dir = agent_workspace_dir(agent_id);
+        nlohmann::json files = nlohmann::json::array();
+        std::set<std::string> seen;
+        for (const auto& name : agent_core_files()) {
+          files.push_back(agent_file_entry(dir, name, false));
+          seen.insert(name);
+        }
+        // Surface any other *.md files present in the workspace too.
+        std::error_code ec;
+        if (std::filesystem::is_directory(dir, ec)) {
+          for (const auto& de : std::filesystem::directory_iterator(dir, ec)) {
+            if (!de.is_regular_file()) continue;
+            auto fn = de.path().filename().string();
+            if (fn.size() > 3 && fn.substr(fn.size() - 3) == ".md" &&
+                seen.insert(fn).second) {
+              files.push_back(agent_file_entry(dir, fn, false));
+            }
+          }
+        }
+        return {{"agentId", agent_id}, {"workspace", dir}, {"files", files}};
+      });
+
+  // --- agents.files.get ---
+  server.RegisterHandler(
+      "agents.files.get",
+      [](const nlohmann::json& params,
+         ClientConnection& /*client*/) -> nlohmann::json {
+        std::string agent_id = params.value("agentId", "main");
+        std::string name = params.value("name", "");
+        if (!agent_file_name_ok(name)) {
+          throw std::runtime_error("agents.files.get: invalid file name");
+        }
+        std::string dir = agent_workspace_dir(agent_id);
+        return {{"agentId", agent_id},
+                {"workspace", dir},
+                {"file", agent_file_entry(dir, name, true)}};
+      });
+
+  // --- agents.files.set ---
+  server.RegisterHandler(
+      "agents.files.set",
+      [logger](const nlohmann::json& params,
+               ClientConnection& /*client*/) -> nlohmann::json {
+        std::string agent_id = params.value("agentId", "main");
+        std::string name = params.value("name", "");
+        if (!agent_file_name_ok(name)) {
+          throw std::runtime_error("agents.files.set: invalid file name");
+        }
+        std::string content = params.value("content", "");
+        std::string dir = agent_workspace_dir(agent_id);
+        std::error_code ec;
+        std::filesystem::create_directories(dir, ec);
+        std::filesystem::path p = std::filesystem::path(dir) / name;
+        {
+          std::ofstream out(p, std::ios::binary | std::ios::trunc);
+          if (!out) {
+            throw std::runtime_error("agents.files.set: cannot write " +
+                                     p.string());
+          }
+          out << content;
+        }
+        logger->info("agents.files.set: wrote {} ({} bytes)", p.string(),
+                     content.size());
+        return {{"ok", true},
+                {"agentId", agent_id},
+                {"workspace", dir},
+                {"file", agent_file_entry(dir, name, true)}};
+      });
+
+  // --- system-presence ---
+  // Single-node local gateway: no remote presence to report (empty array).
+  server.RegisterHandler(
+      "system-presence",
+      [](const nlohmann::json& /*params*/,
+         ClientConnection& /*client*/) -> nlohmann::json {
+        return nlohmann::json::array();
+      });
+
+  // --- last-heartbeat ---
+  server.RegisterHandler(
+      "last-heartbeat",
+      [&server](const nlohmann::json& /*params*/,
+                ClientConnection& /*client*/) -> nlohmann::json {
+        return {{"ok", true},
+                {"timestamp", usage_now_ms()},
+                {"uptimeSeconds", server.GetUptimeSeconds()}};
+      });
+
+  // --- exec.approvals.get / exec.approvals.node.get ---
+  // Single-node: node variant returns the same gateway-level document.
+  {
+    auto exec_approvals_get =
+        [](const nlohmann::json& /*params*/,
+           ClientConnection& /*client*/) -> nlohmann::json {
+      return build_exec_approvals_snapshot();
+    };
+    server.RegisterHandler("exec.approvals.get", exec_approvals_get);
+    server.RegisterHandler("exec.approvals.node.get", exec_approvals_get);
+
+    auto exec_approvals_set =
+        [logger](const nlohmann::json& params,
+                 ClientConnection& /*client*/) -> nlohmann::json {
+      write_exec_approvals(params.value("file", nlohmann::json::object()),
+                           params.value("baseHash", ""));
+      logger->info("exec.approvals.set: document replaced");
+      return build_exec_approvals_snapshot();
+    };
+    server.RegisterHandler("exec.approvals.set", exec_approvals_set);
+    server.RegisterHandler("exec.approvals.node.set", exec_approvals_set);
+  }
+
+  // --- exec.approval.resolve ---
+  server.RegisterHandler(
+      "exec.approval.resolve",
+      [exec_approval_mgr, logger](
+          const nlohmann::json& params,
+          ClientConnection& /*client*/) -> nlohmann::json {
+        std::string id = params.value("id", "");
+        if (id.empty()) {
+          throw std::runtime_error("exec.approval.resolve: id is required");
+        }
+        std::string d;
+        for (char c : params.value("decision", std::string{})) {
+          d += static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+        }
+        quantclaw::ApprovalDecision dec =
+            (d.find("appr") != std::string::npos ||
+             d.find("allow") != std::string::npos || d == "yes")
+                ? quantclaw::ApprovalDecision::kApproved
+                : quantclaw::ApprovalDecision::kDenied;
+        bool ok =
+            exec_approval_mgr && exec_approval_mgr->Resolve(id, dec, "operator");
+        logger->info("exec.approval.resolve: id={} decision={} ok={}", id,
+                     quantclaw::ApprovalDecisionToString(dec), ok);
+        return {{"ok", ok},
+                {"id", id},
+                {"decision", quantclaw::ApprovalDecisionToString(dec)}};
+      });
+
+  // --- device.pair.approve / device.pair.reject / device.token.revoke ---
+  // A single-node local gateway authenticates by shared token and keeps no
+  // remote-device pairing store, so these succeed as no-ops — the devices
+  // panel functions without errors. (Full device-token issuance/validation is
+  // tracked separately.)
+  server.RegisterHandler(
+      "device.pair.approve",
+      [logger](const nlohmann::json& params,
+               ClientConnection& /*client*/) -> nlohmann::json {
+        std::string req = params.value("requestId", "");
+        logger->info("device.pair.approve: requestId={}", req);
+        return {{"ok", true}, {"requestId", req}};
+      });
+  server.RegisterHandler(
+      "device.pair.reject",
+      [](const nlohmann::json& params,
+         ClientConnection& /*client*/) -> nlohmann::json {
+        return {{"ok", true}, {"requestId", params.value("requestId", "")}};
+      });
+  server.RegisterHandler(
+      "device.token.revoke",
+      [](const nlohmann::json& params,
+         ClientConnection& /*client*/) -> nlohmann::json {
+        return {{"ok", true}, {"deviceId", params.value("deviceId", "")}};
+      });
+
+  // --- update.run ---
+  server.RegisterHandler(
+      "update.run",
+      [](const nlohmann::json& /*params*/,
+         ClientConnection& /*client*/) -> nlohmann::json {
+        return {{"ok", false},
+                {"restartDelayMs", 0},
+                {"message",
+                 "Self-update is not available for this local build; rebuild "
+                 "from source."}};
+      });
 
   // ================================================================
   // OpenClaw-compatible RPC handlers (protocol shim)
@@ -936,7 +1787,8 @@ void register_rpc_handlers(
           std::string managed_dir =
               (std::filesystem::path(home_str) / ".quantclaw/skills").string();
 
-          auto skills = skill_loader->LoadSkills(config.skills, workspace_path);
+          auto skills = skill_loader->LoadSkills(config.skills, workspace_path,
+                                                 /*include_all=*/true);
 
           nlohmann::json skill_entries = nlohmann::json::array();
           for (const auto& skill : skills) {
@@ -944,9 +1796,20 @@ void register_rpc_handlers(
             std::string skill_key =
                 skill.skill_key.empty() ? skill.name : skill.skill_key;
 
+            bool disabled = false;
+            auto entry_it = config.skills.entries.find(skill.name);
+            if (entry_it != config.skills.entries.end()) {
+              disabled = !entry_it->second.enabled;
+            }
+
             // Build missing bins/env/config lists
             nlohmann::json missing_bins = nlohmann::json::array();
             nlohmann::json missing_env = nlohmann::json::array();
+            for (const auto& env_var : skill.required_envs) {
+              if (std::getenv(env_var.c_str()) == nullptr) {
+                missing_env.push_back(env_var);
+              }
+            }
 
             // Build install options from SkillInstallInfo
             nlohmann::json install_opts = nlohmann::json::array();
@@ -982,7 +1845,7 @@ void register_rpc_handlers(
                  {"emoji", skill.emoji},
                  {"homepage", skill.homepage},
                  {"always", skill.always},
-                 {"disabled", false},
+                 {"disabled", disabled},
                  {"blockedByAllowlist", false},
                  {"eligible", !gated},
                  {"requirements",
@@ -1658,20 +2521,25 @@ void register_rpc_handlers(
                          });
 
   // --- logs.tail ---
-  // Return recent lines from the gateway log file.
+  // Return recent lines from the gateway log file. The cursor is a line
+  // offset: omit it (or pass a stale value past EOF) to get the tail of the
+  // file with reset=true; pass the previously returned cursor to receive
+  // only new lines. maxBytes caps the payload size per response.
   server.RegisterHandler(
       "logs.tail",
       [logger, log_file_path](const nlohmann::json& params,
                               ClientConnection& /*client*/) -> nlohmann::json {
-        int req_limit = params.value("limit", 200);
-        int max_bytes = params.value("maxBytes", 512 * 1024);
-        long long cursor = params.value("cursor", 0LL);
-        (void)max_bytes;
-        (void)cursor;
+        int req_limit = std::max(1, params.value("limit", 200));
+        long long max_bytes =
+            std::max(1LL, params.value("maxBytes", 512LL * 1024));
+        bool has_cursor =
+            params.contains("cursor") && params["cursor"].is_number();
+        long long cursor = has_cursor ? params["cursor"].get<long long>() : 0;
 
         nlohmann::json lines = nlohmann::json::array();
-        long long new_cursor = cursor;
+        long long new_cursor = 0;
         bool truncated = false;
+        bool reset = !has_cursor;
 
         // Normalize the path and verify its structure before opening
         // (guards against $HOME containing '..' traversal components).
@@ -1688,19 +2556,39 @@ void register_rpc_handlers(
             while (std::getline(ifs, line)) {
               all_lines.push_back(line);
             }
-            int total = static_cast<int>(all_lines.size());
-            int start = std::max(0, total - req_limit);
-            for (int i = start; i < total; ++i) {
-              lines.push_back(all_lines[i]);
+            long long total = static_cast<long long>(all_lines.size());
+
+            long long start;
+            if (!has_cursor || cursor < 0 || cursor > total) {
+              // Initial load, or the file shrank/rotated: tail the file.
+              reset = true;
+              start = std::max(0LL, total - req_limit);
+            } else {
+              start = cursor;
             }
-            new_cursor = total;
-            truncated = start > 0;
+
+            long long bytes = 0;
+            long long i = start;
+            for (; i < total; ++i) {
+              long long line_bytes =
+                  static_cast<long long>(all_lines[i].size()) + 1;
+              if (!lines.empty() &&
+                  (bytes + line_bytes > max_bytes ||
+                   static_cast<int>(lines.size()) >= req_limit)) {
+                break;
+              }
+              lines.push_back(all_lines[i]);
+              bytes += line_bytes;
+            }
+            new_cursor = i;
+            truncated = i < total || (reset && start > 0);
           }
         }
 
         return {{"file", log_file_path},
                 {"cursor", new_cursor},
                 {"lines", lines},
+                {"reset", reset},
                 {"truncated", truncated}};
       });
 
@@ -1779,152 +2667,126 @@ void register_rpc_handlers(
   }
 
   // --- skills.update ---
-  // Enable/disable a skill or save its API key.
+  // Enable/disable a skill or save its API key. Persists to the config file
+  // (skills.entries.<name>), exports the key to the skill's primaryEnv so
+  // gating passes immediately, and hot-reloads the running config.
   if (skill_loader) {
     server.RegisterHandler(
         "skills.update",
-        [logger](const nlohmann::json& params,
-                 ClientConnection& /*client*/) -> nlohmann::json {
+        [skill_loader, &config, logger,
+         reload_fn](const nlohmann::json& params,
+                    ClientConnection& /*client*/) -> nlohmann::json {
           std::string skill_key = params.value("skillKey", "");
           if (skill_key.empty()) {
             throw std::runtime_error("skillKey is required");
           }
-          // Persist enable/disable flag via env or config file is not yet
-          // implemented; acknowledge the request so the UI doesn't show an
-          // error.
-          bool enabled = params.value("enabled", true);
-          logger->info("skills.update: skillKey={} enabled={}", skill_key,
-                       enabled);
+
+          // Resolve skillKey -> skill (entries are keyed by skill name).
+          const char* home = std::getenv("HOME");
+          std::string home_str = home ? home : "/tmp";
+          auto workspace_path = std::filesystem::path(home_str) /
+                                ".quantclaw/agents/main/workspace";
+          auto skills = skill_loader->LoadSkills(config.skills, workspace_path,
+                                                 /*include_all=*/true);
+          const quantclaw::SkillMetadata* match = nullptr;
+          for (const auto& skill : skills) {
+            std::string key =
+                skill.skill_key.empty() ? skill.name : skill.skill_key;
+            if (key == skill_key || skill.name == skill_key) {
+              match = &skill;
+              break;
+            }
+          }
+          if (!match) {
+            throw std::runtime_error("Unknown skill: " + skill_key);
+          }
+
+          std::optional<bool> enabled;
+          if (params.contains("enabled") && params["enabled"].is_boolean()) {
+            enabled = params["enabled"].get<bool>();
+          }
+          std::optional<std::string> api_key;
+          if (params.contains("apiKey") && params["apiKey"].is_string()) {
+            api_key = params["apiKey"].get<std::string>();
+          }
+          if (!enabled.has_value() && !api_key.has_value()) {
+            throw std::runtime_error("enabled or apiKey is required");
+          }
+
+          persist_skill_entry(match->name, enabled, api_key);
+
+          // Export immediately so gating reflects the change without restart.
+          if (api_key.has_value() && !match->primary_env.empty()) {
+            if (api_key->empty()) {
+              ::unsetenv(match->primary_env.c_str());
+            } else {
+              ::setenv(match->primary_env.c_str(), api_key->c_str(), 1);
+            }
+          }
+
+          if (reload_fn) {
+            reload_fn();
+          }
+          logger->info("skills.update: skill={} enabled={} apiKey={}",
+                       match->name,
+                       enabled.has_value() ? (*enabled ? "true" : "false")
+                                           : "unchanged",
+                       api_key.has_value() ? "updated" : "unchanged");
           return {{"ok", true}, {"skillKey", skill_key}};
         });
   }
 
   // --- sessions.usage ---
-  // Aggregate token usage from session histories for a date range.
+  // Real token aggregation across all session transcripts (messages, tools,
+  // by-model/provider/agent/channel, daily). Costs are not tracked (tokens
+  // only). Optional startDate/endDate (YYYY-MM-DD) filter by message date.
   server.RegisterHandler(
       "sessions.usage",
-      [session_manager,
-       &config](const nlohmann::json& params,
-                ClientConnection& /*client*/) -> nlohmann::json {
-        std::string start_date = params.value("startDate", "");
-        std::string end_date = params.value("endDate", "");
-
-        auto now_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
-                          std::chrono::system_clock::now().time_since_epoch())
-                          .count();
-
-        // Aggregate totals across all sessions
-        long long total_input = 0, total_output = 0;
-        nlohmann::json session_entries = nlohmann::json::array();
-
-        auto sessions = session_manager->ListSessions();
-        for (const auto& s : sessions) {
-          auto history = session_manager->GetHistory(s.session_key, -1);
-          long long in_tok = 0, out_tok = 0;
-          for (const auto& msg : history) {
-            if (msg.usage) {
-              in_tok += msg.usage->input_tokens;
-              out_tok += msg.usage->output_tokens;
-            }
-          }
-          total_input += in_tok;
-          total_output += out_tok;
-
-          session_entries.push_back({{"key", s.session_key},
-                                     {"label", s.display_name},
-                                     {"model", config.agent.model},
-                                     {"usage",
-                                      {{"input", in_tok},
-                                       {"output", out_tok},
-                                       {"cacheRead", 0},
-                                       {"cacheWrite", 0},
-                                       {"totalTokens", in_tok + out_tok},
-                                       {"totalCost", 0.0},
-                                       {"missingCostEntries", 0}}}});
-        }
-
-        nlohmann::json zero_totals = {
-            {"input", total_input},
-            {"output", total_output},
-            {"cacheRead", 0},
-            {"cacheWrite", 0},
-            {"totalTokens", total_input + total_output},
-            {"totalCost", 0.0},
-            {"inputCost", 0.0},
-            {"outputCost", 0.0},
-            {"cacheReadCost", 0.0},
-            {"cacheWriteCost", 0.0},
-            {"missingCostEntries", 0}};
-
-        return {{"updatedAt", now_ms},
-                {"startDate", start_date},
-                {"endDate", end_date},
-                {"sessions", session_entries},
-                {"totals", zero_totals},
-                {"aggregates",
-                 {{"messages",
-                   {{"total", 0},
-                    {"user", 0},
-                    {"assistant", 0},
-                    {"toolCalls", 0},
-                    {"toolResults", 0},
-                    {"errors", 0}}},
-                  {"tools",
-                   {{"totalCalls", 0},
-                    {"uniqueTools", 0},
-                    {"tools", nlohmann::json::array()}}},
-                  {"byModel", nlohmann::json::array()},
-                  {"byProvider", nlohmann::json::array()},
-                  {"byAgent", nlohmann::json::array()},
-                  {"byChannel", nlohmann::json::array()},
-                  {"daily", nlohmann::json::array()}}}};
+      [session_manager, &config](
+          const nlohmann::json& params,
+          ClientConnection& /*client*/) -> nlohmann::json {
+        return compute_sessions_usage(*session_manager, config,
+                                      params.value("startDate", ""),
+                                      params.value("endDate", ""));
       });
 
   // --- usage.cost ---
-  // Return daily cost summary (costs are zero since we don't track model
-  // pricing).
+  // Daily token totals + grand totals (token counts only; cost fields are 0).
   server.RegisterHandler(
       "usage.cost",
-      [](const nlohmann::json& params,
-         ClientConnection& /*client*/) -> nlohmann::json {
-        std::string start_date = params.value("startDate", "");
-        std::string end_date = params.value("endDate", "");
-        auto now_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
-                          std::chrono::system_clock::now().time_since_epoch())
-                          .count();
-        nlohmann::json zero_totals = {{"input", 0},
-                                      {"output", 0},
-                                      {"cacheRead", 0},
-                                      {"cacheWrite", 0},
-                                      {"totalTokens", 0},
-                                      {"totalCost", 0.0},
-                                      {"inputCost", 0.0},
-                                      {"outputCost", 0.0},
-                                      {"cacheReadCost", 0.0},
-                                      {"cacheWriteCost", 0.0},
-                                      {"missingCostEntries", 0}};
-        return {{"updatedAt", now_ms},
-                {"days", 0},
-                {"daily", nlohmann::json::array()},
-                {"totals", zero_totals}};
+      [session_manager](const nlohmann::json& params,
+                        ClientConnection& /*client*/) -> nlohmann::json {
+        return compute_usage_cost(*session_manager,
+                                  params.value("startDate", ""),
+                                  params.value("endDate", ""));
       });
 
   // --- sessions.usage.timeseries ---
-  // Return empty time series; UI silently fails on this.
-  server.RegisterHandler("sessions.usage.timeseries",
-                         [](const nlohmann::json& /*params*/,
-                            ClientConnection& /*client*/) -> nlohmann::json {
-                           return {{"sessionId", nullptr},
-                                   {"points", nlohmann::json::array()}};
-                         });
+  // Per-message token timeseries (cumulative) for one session (param: key).
+  server.RegisterHandler(
+      "sessions.usage.timeseries",
+      [session_manager](const nlohmann::json& params,
+                        ClientConnection& /*client*/) -> nlohmann::json {
+        std::string key = params.value("key", params.value("sessionId", ""));
+        if (key.empty()) {
+          return {{"sessionId", nullptr}, {"points", nlohmann::json::array()}};
+        }
+        return compute_session_timeseries(*session_manager, key);
+      });
 
   // --- sessions.usage.logs ---
-  // Return empty logs; UI silently fails on this.
-  server.RegisterHandler("sessions.usage.logs",
-                         [](const nlohmann::json& /*params*/,
-                            ClientConnection& /*client*/) -> nlohmann::json {
-                           return {{"logs", nlohmann::json::array()}};
-                         });
+  // Per-message transcript log for one session (params: key, limit).
+  server.RegisterHandler(
+      "sessions.usage.logs",
+      [session_manager](const nlohmann::json& params,
+                        ClientConnection& /*client*/) -> nlohmann::json {
+        std::string key = params.value("key", params.value("sessionId", ""));
+        if (key.empty()) {
+          return {{"logs", nlohmann::json::array()}};
+        }
+        long long limit = params.value("limit", 1000);
+        return compute_session_logs(*session_manager, key, limit);
+      });
 
   int handler_count = 24;  // base handlers (22 + 2 memory)
   if (reload_fn)

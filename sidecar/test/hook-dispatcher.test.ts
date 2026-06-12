@@ -67,6 +67,20 @@ describe("HookDispatcher", () => {
       await dispatcher.fire("before_model_resolve", {});
       expect(order).toEqual([100, 50, 1]);
     });
+
+    it("should remove all hooks on clear", () => {
+      dispatcher.register({
+        pluginId: "test",
+        hookName: "message_received",
+        handler: async () => {},
+        priority: 0,
+      });
+
+      dispatcher.clear();
+
+      expect(dispatcher.registeredHooks()).toEqual([]);
+      expect(dispatcher.handlerCount("message_received")).toBe(0);
+    });
   });
 
   // -----------------------------------------------------------------------
