@@ -1130,10 +1130,22 @@ bool ToolRegistry::should_request_mutation_approval(
 // File tools
 // ---------------------------------------------------------------------------
 
+// Resolve a tool-supplied path against the agent workspace: relative paths are
+// rooted at the workspace (which is also the sandbox root) so the agent can use
+// simple names like "notes.md"; absolute paths are returned as-is for the
+// sandbox check to validate.
+std::string ToolRegistry::resolve_workspace_path(const std::string& path) const {
+  std::filesystem::path p(path);
+  if (p.is_relative() && !workspace_path_.empty()) {
+    p = std::filesystem::path(workspace_path_) / p;
+  }
+  return p.lexically_normal().string();
+}
+
 std::string ToolRegistry::read_file_tool(const nlohmann::json& params) {
   if (!params.contains("path"))
     throw std::runtime_error("Missing required parameter: path");
-  std::string path = params["path"].get<std::string>();
+  std::string path = resolve_workspace_path(params["path"].get<std::string>());
   if (!quantclaw::SecuritySandbox::ValidateFilePath(path, workspace_path_))
     throw std::runtime_error("Access denied: path outside workspace: " + path);
   if (!std::filesystem::exists(path))
@@ -1147,7 +1159,7 @@ std::string ToolRegistry::read_file_tool(const nlohmann::json& params) {
 std::string ToolRegistry::write_file_tool(const nlohmann::json& params) {
   if (!params.contains("path") || !params.contains("content"))
     throw std::runtime_error("Missing required parameters: path, content");
-  std::string path = params["path"].get<std::string>();
+  std::string path = resolve_workspace_path(params["path"].get<std::string>());
   std::string content = params["content"].get<std::string>();
   if (!quantclaw::SecuritySandbox::ValidateFilePath(path, workspace_path_))
     throw std::runtime_error("Access denied: path outside workspace: " + path);

@@ -146,6 +146,9 @@ int GatewayCommands::ForegroundCommand(const std::vector<std::string>& args) {
 
   auto skill_loader = std::make_shared<quantclaw::SkillLoader>(logger_);
   auto tool_registry = std::make_shared<quantclaw::ToolRegistry>(logger_);
+  // Point file tools + sandbox at the agent's actual workspace (not the
+  // ToolRegistry default), so relative paths resolve there and stay sandboxed.
+  tool_registry->SetWorkspace(workspace_dir.string());
   tool_registry->RegisterBuiltinTools();
   tool_registry->RegisterChainTool();
 

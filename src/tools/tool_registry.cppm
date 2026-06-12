@@ -143,6 +143,7 @@ class ToolRegistry {
 										 std::function<std::string(const nlohmann::json&)> handler);
 
 	// Built-in tool implementations
+	std::string resolve_workspace_path(const std::string& path) const;
 	std::string read_file_tool(const nlohmann::json& params);
 	std::string write_file_tool(const nlohmann::json& params);
 	std::string edit_file_tool(const nlohmann::json& params);
