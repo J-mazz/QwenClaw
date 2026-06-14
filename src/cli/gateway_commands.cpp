@@ -285,12 +285,12 @@ int GatewayCommands::ForegroundCommand(const std::vector<std::string>& args) {
     }
   };
 
-  // Initialize cron scheduler
+  // Initialize cron scheduler.  Load() always records the storage path (and is
+  // a no-op when the file is absent), so call it unconditionally — otherwise
+  // AddJob can't persist on a fresh setup where cron.json does not exist yet.
   auto cron_scheduler = std::make_shared<quantclaw::CronScheduler>(logger_);
   std::string cron_file = (base_dir / "cron.json").string();
-  if (std::filesystem::exists(cron_file)) {
-    cron_scheduler->Load(cron_file);
-  }
+  cron_scheduler->Load(cron_file);
 
   // Initialize exec approval manager
   auto exec_approval_mgr =
@@ -492,6 +492,20 @@ int GatewayCommands::ForegroundCommand(const std::vector<std::string>& args) {
       logger_);
   command_queue->Start();
 
+  // Start the cron scheduler now that the command queue is live.  A fired job
+  // is injected as a normal message into its target session (kCollect: runs
+  // when the session is idle, batches as a follow-up if a run is already
+  // active).  Stopped explicitly during shutdown below so its thread is joined
+  // while command_queue is still alive.
+  cron_scheduler->Start(
+      [cq = command_queue.get(), log = logger_](const quantclaw::CronJob& job) {
+        log->info("Cron job '{}' firing -> session {}", job.name,
+                  job.session_key);
+        cq->Submit(job.session_key, job.message, nlohmann::json::object(),
+                   /*connection_id=*/"", /*rpc_request_id=*/"",
+                   gateway::QueueMode::kCollect);
+      });
+
   // Initialize plugin system
   quantclaw::PluginSystem plugin_system(logger_);
   plugin_system.Initialize(config, workspace_dir);
@@ -645,6 +659,10 @@ int GatewayCommands::ForegroundCommand(const std::vector<std::string>& args) {
   if (config_watcher.joinable()) {
     config_watcher.join();
   }
+
+  // Join the cron thread before command_queue (declared later, destroyed
+  // earlier) goes out of scope, so a firing job can't use a freed queue.
+  cron_scheduler->Stop();
 
   if (adapter_manager)
     adapter_manager->Stop();
