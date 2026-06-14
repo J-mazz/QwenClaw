@@ -1,0 +1,232 @@
+identifier,asset_type,instruction,eligible_for_bounty,eligible_for_submission,availability_requirement,confidentiality_requirement,integrity_requirement,max_severity,system_tags,created_at,updated_at
+addons.allizom.org,URL,"** Critical Site**
+
+This is the staging server for Firefox Addons. Testing should be restricted to this instance without any testing on production.
+
+Additional domains for Addons:
+ - services.addons.allizom.org
+  - versioncheck-bg.addons.allizom.org
+   - versioncheck.addons.allizom.org
+
+Source Code: https://github.com/mozilla/addons-server",true,true,,,,critical,"Django, MySQL, Python, React",2023-01-13 13:00:48 UTC,2024-11-29 15:40:32 UTC
+developer.mozilla.org,URL,"**Core Site**
+
+Please use the staging instance for intrusive tests or for tests which change the content: https://developer.allizom.org
+
+Source Code: 
+Main application: https://github.com/mdn/mdn
+Repos under https://github.com/mdn",true,true,,,,critical,"React, Amazon Web Services, PostgresSQL, Rust",2023-01-13 13:13:43 UTC,2025-06-04 15:22:27 UTC
+accounts.firefox.com,URL,"** Critical Site**
+
+Mozilla Accounts (previously known as Firefox Accounts)
+
+Additional domains in scope for Firefox Accounts:
+* api.accounts.firefox.com
+* oauth.accounts.firefox.com
+* profile.accounts.firefox.com
+* verifier.accounts.firefox.com
+* graphql.accounts.firefox.com
+* subscriptions.firefox.com
+
+Source Code: https://github.com/mozilla/fxa",true,true,high,high,high,critical,"React, Backbone.js, JavaScript, Node.js",2023-01-13 13:18:43 UTC,2025-06-06 13:16:17 UTC
+profiler.firefox.com,URL,"**Core Site**
+
+Web application for Firefox Profiler
+
+Source Code: https://github.com/firefox-devtools/profiler",true,true,,,,critical,"JavaScript, Node.js, C++, Rust, React",2023-01-13 14:44:01 UTC,2024-11-29 15:44:47 UTC
+vpn.mozilla.org,URL,"**Core Site**
+
+This is the backend server behind Mozilla VPN.
+",true,true,,,,critical,"JavaScript, Node.js",2023-01-13 14:46:18 UTC,2024-11-29 15:47:44 UTC
+relay.firefox.com,URL,"**Core Site**
+
+Testing to be done on the staging instance only: https://relay.allizom.org/
+
+Please set the HTTP header ""X-HackerOne-Research"" when sending requests to the Relay servers, so that the traffic can be identified as resulting from bug bounty testing.
+
+The team would like testing to be focused on the APIs listed here: https://mozilla.github.io/fx-private-relay/api_docs.html
+
+Source Code: https://github.com/mozilla/fx-private-relay",true,true,,,,critical,"React, Python, PostgresSQL, Google Cloud Platform, Django, Amazon Web Services, TypeScript",2023-01-13 14:47:31 UTC,2026-05-07 12:46:32 UTC
+api.profiler.firefox.com,URL,"**Core Site**
+
+API server for Firefox Profiler
+
+Source Code: https://github.com/firefox-devtools/profiler",true,true,,,,critical,,2023-01-18 10:54:25 UTC,2024-11-29 15:48:50 UTC
+Mozilla VPN Clients,OTHER,"** Critical Site**
+
+Mozilla VPN iOS, Android, Desktop Clients. 
+
+Note that Mozilla VPN subscriptions are only open in [these countries](https://support.mozilla.org/en-US/kb/mozilla-vpn-countries-available-subscribe).
+
+Source Code: https://github.com/mozilla-mobile/mozilla-vpn-client",true,true,,,,critical,,2023-01-27 14:46:00 UTC,2024-11-29 15:48:22 UTC
+www.mozilla.org,URL,"**Core Site**
+
+Mozilla Marketing Website aka Bedrock.
+
+ Please use our staging instance, www.allizom.org, for testing to avoid site disruption.
+
+Source Code:  https://github.com/mozilla/bedrock",true,true,,,,critical,"Django, Python",2023-05-02 10:06:16 UTC,2024-11-29 15:50:18 UTC
+support.mozilla.org,URL,"**Core Site**
+
+Support platform for all of Mozilla Products.
+
+**Testing to be done on staging instance only to avoid disrupting users: support.allizom.org**
+
+Source Code: https://github.com/mozilla/kitsune",true,true,,,,critical,Python,2023-06-22 13:01:40 UTC,2024-11-29 15:50:49 UTC
+hg.mozilla.org,URL,"The website used for source code and version control hosting for Firefox.
+
+Web vulnerabilities that affect the website itself and not the source code will be considered as vulnerabilities in a **Core Site**.
+
+Vulnerabilities that affect the source code itself will be considered as vulnerabilities in a **Critical Site**.
+
+Source Code: https://github.com/mozilla/version-control-tools
+",true,true,,,,critical,,2023-06-22 13:28:26 UTC,2024-12-03 09:31:20 UTC
+stage.taskcluster.nonprod.cloudops.mozgcp.net,URL,"**Core Site**
+
+Staging instance for TaskCluster CI/CD tool.
+
+Source Code: https://github.com/taskcluster/taskcluster",true,true,,,,critical,,2023-06-26 10:40:32 UTC,2024-11-29 15:54:26 UTC
+community-tc.services.mozilla.com,URL,"**Core Site**
+
+Community instance of TaskCluster CI/CD tool.
+
+Source Code: https://github.com/taskcluster/taskcluster",true,true,,,,critical,,2023-06-26 10:42:56 UTC,2024-11-29 15:54:35 UTC
+monitor.mozilla.org,URL,"**Core Site**
+
+Mozilla Monitor
+
+Source Code: https://github.com/mozilla/blurts-server",true,true,,,,critical,,2024-03-07 15:44:06 UTC,2025-12-11 08:11:31 UTC
+Product Delivery,OTHER,"** Critical Site**
+
+**Do not run automated scans on those domains**
+
+Firefox Downloads which include the below sites:
+- archive.mozilla.org
+- download.mozilla.org
+- download-installer.cdn.mozilla.net
+- treeherder.mozilla.org
+
+Note that content on these assets is intentionally public.
+
+Source Code: https://github.com/mozilla/treeherder",true,true,,,,critical,,2024-04-01 09:08:13 UTC,2024-12-03 09:36:24 UTC
+aus5.mozilla.org,URL,"** Critical Site**
+
+Backend update system for Mozilla products.
+
+No disruptive testing or scanning tools to be run on production.
+
+Source Code: https://github.com/mozilla-releng/balrog ",true,true,,,,critical,,2024-04-01 09:08:13 UTC,2024-12-03 09:22:36 UTC
+bugzilla.mozilla.org,URL,"** Critical Site**
+
+Mozilla owned Bugzilla instance.
+
+Please do not use automated scanners, create, or modify bugs when testing Bugzilla. Instead, testing should be only done on the development instance, bugzilla-dev.allizom.org.
+
+Source Code: https://github.com/mozilla-bteam/bmo",true,true,,,,critical,"Perl, Google Cloud Platform, Nginx, MySQL",2024-04-01 09:08:13 UTC,2024-12-03 09:13:15 UTC
+crash-reports.allizom.org,URL,"** Critical Site**
+
+Endpoint for sending Firefox crash reports.
+
+Testing to be done on staging instance: https://crash-reports.allizom.org/
+
+Source Code: https://github.com/mozilla-services/socorro",true,true,,,,critical,,2024-04-01 09:08:13 UTC,2024-12-03 09:15:27 UTC
+crash-stats.allizom.org,URL,"** Critical Site**
+
+Analytics site for Firefox crash reports data.
+
+Testing to be done on staging instance only: https://crash-stats.allizom.org/
+
+Source Code: https://github.com/mozilla-services/socorro",true,true,,,,critical,,2024-04-01 09:08:13 UTC,2024-12-03 09:15:17 UTC
+firefox-ci-tc.services.mozilla.com,URL,"** Critical Site**
+
+TaskCluster CI/CD tool instance used for Firefox builds.
+
+Source Code: https://github.com/taskcluster/taskcluster",true,true,,,,critical,,2024-04-01 09:08:13 UTC,2024-11-29 15:54:49 UTC
+firefox.settings.services.mozilla.com,URL,"** Critical Site**
+
+Additional domains for Remote Settings:
+- firefox-settings-attachments.cdn.mozilla.net
+
+Testing to be performed on staging instance only: https://firefox.settings.services.allizom.org/v1/",true,true,,,,critical,,2024-04-01 09:08:13 UTC,2024-12-05 08:09:27 UTC
+lando.services.mozilla.com,URL,"** Critical Site**
+
+Tool used to land Firefox code into Mercurial.
+
+Additional Domains:  
+- api.lando.services.mozilla.com
+- lando.moz.tools
+
+Testing to be done on staging or development instances only:
+- ui.dev.lando.nonprod.cloudops.mozgcp.net
+- ui.stage.lando.nonprod.cloudops.mozgcp.net
+- api.dev.lando.nonprod.cloudops.mozgcp.net
+- api.stage.lando.nonprod.cloudops.mozgcp.net
+
+Source Code: 
+- https://github.com/mozilla-conduit/lando
+- https://github.com/mozilla-conduit/lando-api 
+- https://github.com/mozilla-conduit/lando-ui",true,true,,,,critical,,2024-04-01 09:08:13 UTC,2025-04-25 08:41:33 UTC
+merino.services.mozilla.com,URL,"** Critical Site**
+
+Firefox Suggest
+
+Testing to be performed on staging instance only: https://stage.merino.nonprod.cloudops.mozgcp.net/api/v1/suggest
+
+Source Code: https://github.com/mozilla-services/merino-py",true,true,,,,critical,,2024-04-01 09:08:13 UTC,2024-11-29 15:52:55 UTC
+phabricator.allizom.org,URL,"** Critical Site**
+
+Testing to be done **only** on the development instance (phabricator-dev.allizom.org) or the staging instance (phabricator.allizom.org)
+
+Source Code: https://github.com/mozilla-conduit/phabricator",true,true,,,,critical,,2024-04-01 09:08:13 UTC,2024-12-03 09:09:34 UTC
+push.services.mozilla.com,URL,"** Critical Site**
+
+Firefox Push Service.
+
+Additional domain in scope: updates.push.services.mozilla.com
+
+Testing to be done on below staging instances:
+- wss://autopush.stage.mozaws.net
+- https://updates-autopush.stage.mozaws.net
+
+Source Code: https://github.com/mozilla-services/autopush-rs
+",true,true,,,,critical,,2024-04-01 09:08:13 UTC,2024-11-29 15:39:55 UTC
+sync.services.mozilla.com,URL,"** Critical Site**
+
+Firefox Sync Domains:
+- *.sync.services.mozilla.com
+- token.services.mozilla.com
+
+Source Code: 
+- https://github.com/mozilla-services/syncstorage-rs
+- https://github.com/mozilla-services/tokenlib/",true,true,,,,critical,,2024-04-01 09:08:13 UTC,2024-11-29 15:39:24 UTC
+Mozilla Ad Routing Service,OTHER,"** Critical Site **
+Mozilla Ad Routing Service (MARS) under the below domains:
+- ads.mozilla.org (mars.prod.ads.prod.webservices.mozgcp.net)
+- ads.allizom.org (mars.stage.ads.nonprod.webservices.mozgcp.net)
+- mars.qa.ads.nonprod.webservices.mozgcp.net
+- ads-img.mozilla.org
+- ads-img.allizom.org
+- contile.services.mozilla.com
+- spocs.getpocket.com
+- spocs.getpocket.dev
+- spocs.mozilla.net
+- spocs.allizom.net
+
+Testing to be done on the staging instance: 
+- ads.allizom.org
+
+Source Code: https://github.com/mozilla-services/mars",true,true,,,,critical,,2024-07-15 08:35:42 UTC,2024-12-16 08:07:56 UTC
+www.firefox.com,URL,"**Core Site**
+
+Firefox Marketing Website aka Springfield. Only the website is included in the scope, not the Firefox client.
+
+ Please use our staging instance, www.springfield.moz.works, for testing to avoid site disruption.
+
+Source Code:  https://github.com/mozmeao/springfield",true,true,,,,critical,,2025-10-20 15:12:50 UTC,2026-03-19 09:39:51 UTC
+pontoon.allizom.org,URL,"** Critical Site**
+
+Staging instance for Mozilla Localization Service.
+
+Testing is to be done on this instance only, testing on production is not acceptable.
+
+Source Code: https://github.com/mozilla/pontoon",true,true,,,,critical,,2025-11-11 10:09:05 UTC,2025-11-11 10:09:23 UTC

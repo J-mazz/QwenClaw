@@ -1208,8 +1208,10 @@ std::string ToolRegistry::exec_tool(const nlohmann::json& params) {
   int timeout = params.value("timeout", 30);
   std::string workdir = params.value("workdir", "");
 
-  // Validate workdir stays inside the workspace if specified.
-  std::string resolved_workdir = workdir;
+  // Ground the shell in the agent workspace by default so relative paths line
+  // up with the file tools (read/write/edit). An explicit workdir is still
+  // validated to stay inside the workspace.
+  std::string resolved_workdir = workspace_path_;
   if (!workdir.empty()) {
     if (!quantclaw::SecuritySandbox::ValidateFilePath(workdir,
                                                       workspace_path_)) {
