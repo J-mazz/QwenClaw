@@ -1,7 +1,7 @@
 {
   "name": "quantclaw",
   "version-string": "0.3.0",
-  "builtin-baseline": "4b77da7fed37817f124936239197833469f1b9a8",
+  "builtin-baseline": "44819aa2a6c10e56065e2b0330e7d6c89d1d2574",
   "dependencies": [
     "spdlog",
     "nlohmann-json",

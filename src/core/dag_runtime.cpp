@@ -113,6 +113,10 @@ DagRuntime::DagRuntime(const std::string& db_path,
   if (enabled_ && logger_) {
     logger_->info("DAG runtime enabled with DuckDB db: {}", db_path);
   }
+  // Bound the event log carried over from previous runs before serving traffic.
+  if (enabled_) {
+    prune_old_runs();
+  }
 }
 
 DagRuntime::~DagRuntime() {
@@ -185,6 +189,20 @@ void DagRuntime::EndTurn(DagTurnState* turn_state, const std::string& status,
     return;
   }
   finalize_run(turn_state->run_id, status, error);
+
+  // Opportunistic in-session retention so a long-lived gateway stays bounded
+  // (startup pruning alone only bounds across restarts).
+  bool do_prune = false;
+  {
+    std::lock_guard<std::mutex> lock(db_mu_);
+    if (++runs_since_prune_ >= kPruneInterval) {
+      runs_since_prune_ = 0;
+      do_prune = true;
+    }
+  }
+  if (do_prune) {
+    prune_old_runs();
+  }
 }
 
 std::string DagRuntime::LatestRunIdForSession(
@@ -206,6 +224,24 @@ void DagRuntime::init_schema() {
   }
 
   std::string error;
+
+  // Resource caps: DuckDB otherwise defaults memory_limit to ~80% of system
+  // RAM and threads to all cores. This connection is an append-mostly event
+  // log (shared with the recon graph and evolve state, all lightweight point
+  // queries) running alongside llama.cpp inference, so cap it to a small
+  // footprint and leave cores for the model. Non-fatal: a DuckDB build that
+  // rejects a setting should still get its schema.
+  const char* kResourceSql[] = {
+      "SET memory_limit='512MB';",
+      "SET threads=2;",
+  };
+  for (const auto* stmt : kResourceSql) {
+    std::string cfg_error;
+    if (!exec_sql(con, stmt, &cfg_error) && logger_) {
+      logger_->warn("DAG runtime: failed to apply '{}': {}", stmt, cfg_error);
+    }
+  }
+
   const char* kSchemaSql[] = {
       R"SQL(
 CREATE TABLE IF NOT EXISTS dag_runs (
@@ -417,6 +453,37 @@ void DagRuntime::finalize_run(const std::string& run_id,
                    duckdb_result_error(&result));
   }
   duckdb_destroy_result(&result);
+}
+
+void DagRuntime::prune_old_runs() {
+  std::lock_guard<std::mutex> lock(db_mu_);
+  auto con = static_cast<duckdb_connection>(con_);
+  if (!con) {
+    return;
+  }
+
+  // Keep the most recent kRetainRuns runs (created_at is sortable ISO8601;
+  // run_id breaks ties deterministically), drop everything else. Delete the
+  // child rows first so the "keep" set is still computed against the full
+  // dag_runs table, then delete the runs themselves.
+  const std::string keep =
+      "(SELECT run_id FROM dag_runs ORDER BY created_at DESC, run_id DESC LIMIT " +
+      std::to_string(kRetainRuns) + ")";
+  const std::string stmts[] = {
+      "DELETE FROM dag_nodes WHERE run_id NOT IN " + keep + ";",
+      "DELETE FROM dag_edges WHERE run_id NOT IN " + keep + ";",
+      "DELETE FROM dag_runs  WHERE run_id NOT IN " + keep + ";",
+  };
+
+  std::string error;
+  for (const auto& s : stmts) {
+    if (!exec_sql(con, s.c_str(), &error)) {
+      if (logger_) {
+        logger_->warn("DAG runtime: retention prune failed: {}", error);
+      }
+      break;
+    }
+  }
 }
 
 }  // namespace quantclaw

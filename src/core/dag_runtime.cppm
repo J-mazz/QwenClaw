@@ -86,6 +86,15 @@ class DagRuntime : public Noncopyable {
   void finalize_run(const std::string& run_id, const std::string& status,
                     const std::string& error);
 
+  // Retention: keep only the most recent kRetainRuns runs (by created_at),
+  // dropping older runs and their nodes/edges so the event log stays bounded.
+  // Runs once at startup and opportunistically after every kPruneInterval
+  // finalized runs. Scoped to dag_* only — recon/evolve tables are untouched.
+  void prune_old_runs();
+  static constexpr int kRetainRuns = 500;
+  static constexpr int kPruneInterval = 100;
+  int runs_since_prune_ = 0;
+
   std::shared_ptr<spdlog::logger> logger_;
   mutable std::mutex db_mu_;
   void* db_ = nullptr;
