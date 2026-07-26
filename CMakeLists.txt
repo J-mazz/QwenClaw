@@ -52,6 +52,13 @@ endif()
 
 option(BUILD_TESTS "Build tests" ON)
 
+# Build the bundled llama.cpp llama-server alongside the gateway.
+# QuantClaw talks to llama-server over HTTP and does not link against it, so
+# turning this OFF lets the gateway configure, build, and test on a machine with
+# no CUDA toolchain (CI, or while iterating on C++ that has nothing to do with
+# inference). Default ON preserves the normal local workflow.
+option(QC_BUILD_LLAMA_SERVER "Build the bundled llama.cpp llama-server" ON)
+
 # Prefer the workspace's existing vcpkg install trees when present.
 foreach(_qc_vcpkg_root
         "${CMAKE_SOURCE_DIR}/build-vcpkg/vcpkg_installed/x64-linux"
@@ -453,18 +460,61 @@ set_property(TARGET quantclaw PROPERTY CXX_SCAN_FOR_MODULES ON)
 
 # Standalone TurboQuant GGUF quantization script.
 # ── llama.cpp (llama-server) ─────────────────────────────────────────────────
-# Build only the server binary; skip tests, examples, and shared libs so the
-# sub-build stays lean and doesn't clash with our own GTest or OpenSSL targets.
-set(LLAMA_BUILD_TESTS    OFF CACHE BOOL "" FORCE)
-set(LLAMA_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
-set(LLAMA_BUILD_TOOLS    ON  CACHE BOOL "" FORCE)
-set(LLAMA_BUILD_SERVER   ON  CACHE BOOL "" FORCE)
-set(LLAMA_BUILD_COMMON   ON  CACHE BOOL "" FORCE)
-set(LLAMA_BUILD_WEBUI    ON  CACHE BOOL "" FORCE)  # embed llama.cpp chat UI (prebuilt assets in tools/server/public, no Node needed)
-set(BUILD_SHARED_LIBS    OFF CACHE BOOL "" FORCE)
-set(LLAMA_FATAL_WARNINGS OFF CACHE BOOL "" FORCE)
-set(LLAMA_ALL_WARNINGS   OFF CACHE BOOL "" FORCE)
-add_subdirectory(ui/llama.cpp/llama.cpp EXCLUDE_FROM_ALL)
+# Optional sibling build: QuantClaw speaks to llama-server over HTTP and links
+# nothing from it, so the whole subtree is skippable (see QC_BUILD_LLAMA_SERVER).
+if(QC_BUILD_LLAMA_SERVER)
+    # Resolve the CUDA compiler by *discovery* rather than a pinned absolute
+    # path. A pinned path silently rots when the toolkit is upgraded
+    # (cuda-13.2 -> cuda-13.3) and bricks the whole build tree, including the
+    # pure-C++ gateway targets that never needed CUDA in the first place.
+    if(GGML_CUDA)
+        set(_qc_nvcc "")
+        # 1. Explicit CMAKE_CUDA_COMPILER / CUDACXX wins — but only if it exists.
+        if(CMAKE_CUDA_COMPILER AND EXISTS "${CMAKE_CUDA_COMPILER}")
+            set(_qc_nvcc "${CMAKE_CUDA_COMPILER}")
+        elseif(DEFINED ENV{CUDACXX} AND EXISTS "$ENV{CUDACXX}")
+            set(_qc_nvcc "$ENV{CUDACXX}")
+        else()
+            # 2. Otherwise discover it on PATH / in the usual install roots.
+            find_program(QC_NVCC_EXECUTABLE nvcc
+                HINTS ENV CUDA_PATH ENV CUDA_HOME
+                      /usr/local/cuda /opt/cuda
+                PATH_SUFFIXES bin)
+            if(QC_NVCC_EXECUTABLE)
+                set(_qc_nvcc "${QC_NVCC_EXECUTABLE}")
+            endif()
+        endif()
+
+        if(_qc_nvcc)
+            set(CMAKE_CUDA_COMPILER "${_qc_nvcc}" CACHE FILEPATH "" FORCE)
+            message(STATUS "CUDA compiler: ${_qc_nvcc}")
+        else()
+            message(WARNING
+                "GGML_CUDA=ON but no usable nvcc was found (checked "
+                "CMAKE_CUDA_COMPILER, \$CUDACXX, PATH, \$CUDA_PATH, "
+                "/usr/local/cuda, /opt/cuda). Building llama.cpp CPU-only. "
+                "Set CUDACXX or pass -DCMAKE_CUDA_COMPILER=... to re-enable.")
+            set(GGML_CUDA OFF CACHE BOOL "" FORCE)
+        endif()
+    endif()
+
+    # Build only the server binary; skip tests, examples, and shared libs so the
+    # sub-build stays lean and doesn't clash with our own GTest or OpenSSL targets.
+    set(LLAMA_BUILD_TESTS    OFF CACHE BOOL "" FORCE)
+    set(LLAMA_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
+    set(LLAMA_BUILD_TOOLS    ON  CACHE BOOL "" FORCE)
+    set(LLAMA_BUILD_SERVER   ON  CACHE BOOL "" FORCE)
+    set(LLAMA_BUILD_COMMON   ON  CACHE BOOL "" FORCE)
+    set(LLAMA_BUILD_WEBUI    ON  CACHE BOOL "" FORCE)  # embed llama.cpp chat UI (prebuilt assets in tools/server/public, no Node needed)
+    set(BUILD_SHARED_LIBS    OFF CACHE BOOL "" FORCE)
+    set(LLAMA_FATAL_WARNINGS OFF CACHE BOOL "" FORCE)
+    set(LLAMA_ALL_WARNINGS   OFF CACHE BOOL "" FORCE)
+    add_subdirectory(ui/llama.cpp/llama.cpp EXCLUDE_FROM_ALL)
+else()
+    message(STATUS
+        "QC_BUILD_LLAMA_SERVER=OFF — skipping the bundled llama.cpp subtree. "
+        "The gateway still talks to any externally-run llama-server over HTTP.")
+endif()
 
 if(QC_PRECOMPILE_GCC_STDLIB_MODULES)
     # GCC/libstdc++ ships C++23 named module sources at bits/std.cc and
