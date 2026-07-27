@@ -7,6 +7,7 @@
 #include <gtest/gtest.h>
 
 import std;
+import nlohmann.json;
 import quantclaw.providers.llama_provider;
 import quantclaw.providers.llm_provider;
 import quantclaw.providers.provider_error;
@@ -250,9 +251,9 @@ TEST_F(LlamaProviderTest, StreamingToolCallChunks) {
   EXPECT_TRUE(got_end);
 }
 
-// ── SSE parser unit tests ────────────────────────────────────────────────────
-// Test the internal SSE line-parsing logic by exercising ParseResponse
-// indirectly through a thin subclass that exposes a parse method.
+// ── Response shape round-trip (via the mock) ─────────────────────────────────
+// These exercise the request/response plumbing, not the SSE parser itself.
+// Real parser coverage lives in the "SSE parser" section at the bottom.
 
 TEST_F(LlamaProviderTest, ParseResponsePlainText) {
   // Construct a valid OpenAI-format response and verify content extraction.
@@ -319,4 +320,196 @@ TEST_F(LlamaProviderTest, MaxTokensForwarded) {
   provider_->ChatCompletion(req);
 
   EXPECT_EQ(provider_->last_request.max_tokens, 4096);
+}
+
+// ── SSE parser ───────────────────────────────────────────────────────────────
+// Exercises the real streaming parser (quantclaw::llama_detail::ParseSseStream)
+// rather than the mock, using llama-server's actual wire format.
+
+namespace {
+
+// Collects everything the parser emits for a stream.
+struct StreamCapture {
+  std::string content;
+  std::string reasoning;
+  std::vector<quantclaw::ToolCall> tool_calls;
+  bool saw_end = false;
+
+  auto Callback() {
+    return [this](const quantclaw::ChatCompletionResponse& r) {
+      content += r.content;
+      reasoning += r.reasoning_content;
+      for (const auto& tc : r.tool_calls)
+        tool_calls.push_back(tc);
+      if (r.is_stream_end)
+        saw_end = true;
+    };
+  }
+};
+
+// One llama-server chunk, matching the shape captured in tmp/raw-stream-*.txt.
+std::string Chunk(const std::string& delta_json,
+                  const std::string& finish_reason = "null") {
+  return "data: {\"choices\":[{\"delta\":" + delta_json +
+         ",\"finish_reason\":" + finish_reason +
+         ",\"index\":0}],\"object\":\"chat.completion.chunk\"}\n\n";
+}
+
+}  // namespace
+
+// REGRESSION: finish_reason is JSON null on every delta until the final chunk.
+// Reading it with value("finish_reason", "") throws type_error converting
+// null->string; the parser's catch swallowed that and discarded the whole
+// delta, so local-model turns always came back empty. Guard is an explicit
+// is_string() check. See commit 042f1b2.
+TEST_F(LlamaProviderTest, SseDeltasWithNullFinishReasonAreNotDropped) {
+  StreamCapture cap;
+  std::string sse =
+      Chunk(R"({"content":"Two plus two","role":"assistant"})") +
+      Chunk(R"({"content":" equals four."})") +
+      Chunk(R"({})", "\"stop\"") + "data: [DONE]\n\n";
+
+  quantclaw::llama_detail::ParseSseStream(sse, cap.Callback(), logger_);
+
+  EXPECT_EQ(cap.content, "Two plus two equals four.");
+  EXPECT_TRUE(cap.saw_end);
+}
+
+TEST_F(LlamaProviderTest, SseReasoningContentDeltasSurviveNullFinishReason) {
+  StreamCapture cap;
+  std::string sse = Chunk(R"({"reasoning_content":"let me think"})") +
+                    Chunk(R"({"content":"42"})") + "data: [DONE]\n\n";
+
+  quantclaw::llama_detail::ParseSseStream(sse, cap.Callback(), logger_);
+
+  EXPECT_EQ(cap.reasoning, "let me think");
+  EXPECT_EQ(cap.content, "42");
+}
+
+TEST_F(LlamaProviderTest, SseSplitAcrossReadBoundariesReassembles) {
+  // curl hands us arbitrary byte slices, not whole lines.
+  StreamCapture cap;
+  std::string sse = Chunk(R"({"content":"abc"})") +
+                    Chunk(R"({"content":"def"})") + "data: [DONE]\n\n";
+
+  quantclaw::llama_detail::ParseSseStream(sse.substr(0, 37), cap.Callback(),
+                                          logger_);
+  EXPECT_EQ(cap.content, "");  // nothing complete yet
+
+  StreamCapture whole;
+  quantclaw::llama_detail::ParseSseStream(sse, whole.Callback(), logger_);
+  EXPECT_EQ(whole.content, "abcdef");
+}
+
+TEST_F(LlamaProviderTest, SseToolCallArgumentFragmentsAccumulate) {
+  StreamCapture cap;
+  std::string sse =
+      Chunk(
+          R"({"tool_calls":[{"index":0,"id":"call_1","function":{"name":"read","arguments":"{\"path\":"}}]})") +
+      Chunk(
+          R"({"tool_calls":[{"index":0,"function":{"arguments":"\"a.md\"}"}}]})") +
+      Chunk(R"({})", "\"tool_calls\"");
+
+  quantclaw::llama_detail::ParseSseStream(sse, cap.Callback(), logger_);
+
+  ASSERT_EQ(cap.tool_calls.size(), 1u);
+  EXPECT_EQ(cap.tool_calls[0].id, "call_1");
+  EXPECT_EQ(cap.tool_calls[0].name, "read");
+  EXPECT_EQ(cap.tool_calls[0].arguments.value("path", ""), "a.md");
+}
+
+// ── SerializeMessages ────────────────────────────────────────────────────────
+
+TEST_F(LlamaProviderTest, SerializeKeepsLeadingSystemTurn) {
+  std::vector<quantclaw::Message> msgs;
+  msgs.push_back({"system", "you are helpful"});
+  msgs.push_back({"user", "hi"});
+
+  auto out = quantclaw::llama_detail::SerializeMessagesForTest(msgs);
+
+  ASSERT_EQ(out.size(), 2u);
+  EXPECT_EQ(out[0]["role"], "system");
+  EXPECT_EQ(out[1]["role"], "user");
+}
+
+// A mid-conversation system turn is demoted to "user"; the alternation pass
+// then folds it into the adjacent user turn instead of leaving a same-role run
+// (Gemma-style templates reject both).
+TEST_F(LlamaProviderTest, SerializeDemotesLateSystemTurnAndMergesIt) {
+  std::vector<quantclaw::Message> msgs;
+  msgs.push_back({"system", "sys"});
+  msgs.push_back({"user", "first"});
+  msgs.push_back({"system", "injected note"});
+
+  auto out = quantclaw::llama_detail::SerializeMessagesForTest(msgs);
+
+  ASSERT_EQ(out.size(), 2u);
+  EXPECT_EQ(out[0]["role"], "system");
+  EXPECT_EQ(out[1]["role"], "user");
+  EXPECT_EQ(out[1]["content"], "first\n\ninjected note");
+}
+
+TEST_F(LlamaProviderTest, SerializeDropsEmptyTextTurns) {
+  std::vector<quantclaw::Message> msgs;
+  msgs.push_back({"user", "q"});
+  msgs.push_back({"assistant", ""});  // blank/failed response
+  msgs.push_back({"user", "still there?"});
+
+  auto out = quantclaw::llama_detail::SerializeMessagesForTest(msgs);
+
+  // Empty assistant turn dropped, then the two user turns merge.
+  ASSERT_EQ(out.size(), 1u);
+  EXPECT_EQ(out[0]["role"], "user");
+  EXPECT_EQ(out[0]["content"], "q\n\nstill there?");
+}
+
+TEST_F(LlamaProviderTest, SerializePreservesAlternation) {
+  std::vector<quantclaw::Message> msgs;
+  msgs.push_back({"user", "a"});
+  msgs.push_back({"assistant", "b"});
+  msgs.push_back({"user", "c"});
+
+  auto out = quantclaw::llama_detail::SerializeMessagesForTest(msgs);
+
+  ASSERT_EQ(out.size(), 3u);
+  EXPECT_EQ(out[0]["role"], "user");
+  EXPECT_EQ(out[1]["role"], "assistant");
+  EXPECT_EQ(out[2]["role"], "user");
+}
+
+// ── ConvertTools ─────────────────────────────────────────────────────────────
+
+TEST_F(LlamaProviderTest, ConvertToolsPassesThroughWrappedSpec) {
+  // The agent loop already emits OpenAI shape; re-wrapping double-nests
+  // "function" and llama-server rejects it with "key 'name' not found".
+  nlohmann::json wrapped = {
+      {"type", "function"},
+      {"function", {{"name", "read"}, {"description", "d"}}}};
+
+  auto out = quantclaw::llama_detail::ConvertToolsForTest({wrapped});
+
+  ASSERT_EQ(out.size(), 1u);
+  EXPECT_EQ(out[0]["function"]["name"], "read");
+  EXPECT_FALSE(out[0]["function"].contains("function"));
+}
+
+TEST_F(LlamaProviderTest, ConvertToolsWrapsBareSpec) {
+  nlohmann::json bare = {{"name", "read"}, {"description", "d"}};
+
+  auto out = quantclaw::llama_detail::ConvertToolsForTest({bare});
+
+  ASSERT_EQ(out.size(), 1u);
+  EXPECT_EQ(out[0]["type"], "function");
+  EXPECT_EQ(out[0]["function"]["name"], "read");
+}
+
+// A "type" key alone must not be mistaken for an already-wrapped spec.
+TEST_F(LlamaProviderTest, ConvertToolsWrapsSpecWithTypeButNoFunction) {
+  nlohmann::json odd = {{"type", "function"}, {"name", "read"}};
+
+  auto out = quantclaw::llama_detail::ConvertToolsForTest({odd});
+
+  ASSERT_EQ(out.size(), 1u);
+  ASSERT_TRUE(out[0].contains("function"));
+  EXPECT_EQ(out[0]["function"]["name"], "read");
 }

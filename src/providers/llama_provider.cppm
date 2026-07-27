@@ -65,7 +65,16 @@ SerializeMessages(const std::vector<quantclaw::Message>& messages) {
     }
 
     nlohmann::json entry;
-    entry["role"] = msg.role;
+
+    // Only the leading message may carry the "system" role: Gemma-style chat
+    // templates reject a system turn anywhere else. Demote later ones to
+    // "user" — the alternation pass below then folds the result into the
+    // preceding user turn if that creates a same-role run.
+    std::string role = msg.role;
+    if (role == "system" && !arr.empty()) {
+      role = "user";
+    }
+    entry["role"] = role;
 
     if (has_tool_use) {
       entry["content"] = nullptr;
@@ -96,6 +105,10 @@ SerializeMessages(const std::vector<quantclaw::Message>& messages) {
   // response) and merge consecutive same-role text messages. Tool-call and
   // tool-result entries are left untouched. Without this, accumulated history
   // can contain back-to-back user turns, which makes the model emit no content.
+  //
+  // This runs *after* the system->user demotion above, so a demoted system turn
+  // that lands next to a real user turn is folded into it rather than becoming
+  // the very same-role run this pass exists to prevent.
   auto is_plain_text = [](const nlohmann::json& e) {
     return e.contains("content") && e["content"].is_string() &&
            !e.contains("tool_calls") && e.value("role", "") != "tool";
@@ -123,6 +136,10 @@ SerializeMessages(const std::vector<quantclaw::Message>& messages) {
 // through untouched. Only a bare {name,description,parameters} object needs the
 // function envelope. Wrapping an already-wrapped spec double-nests "function"
 // and llama-server rejects it ("key 'name' not found").
+//
+// Test both keys rather than comparing type=="function": a malformed entry with
+// a "type" but no "function" would otherwise be forwarded as-is, and
+// value("type", "") itself throws if "type" is present but not a string.
 nlohmann::json ConvertTools(const std::vector<nlohmann::json>& qc_tools) {
   nlohmann::json out = nlohmann::json::array();
   for (const auto& t : qc_tools) {
@@ -314,6 +331,47 @@ size_t StreamWriteCallback(void* contents, size_t size, size_t nmemb,
 }
 
 }  // namespace
+
+// ── Test seam ────────────────────────────────────────────────────────────────
+// The SSE parser and the two request transforms above are pure functions over
+// JSON, but they sit in an anonymous namespace and the only public entry point
+// (ChatCompletionStream) needs a live llama-server connection. That left the
+// parser untested, which is how a regression that silently dropped *every*
+// stream delta shipped — twice. These forwarders expose the transforms to unit
+// tests without publishing any provider state.
+export namespace quantclaw::llama_detail {
+
+// These are deliberately NOT inline: an exported inline function's body is
+// reachable from importers, so it may not name TU-local entities (the
+// anonymous-namespace parser). Keeping the bodies non-inline confines them to
+// this module's object file, where referring to internal-linkage helpers is
+// fine.
+
+// Run raw SSE bytes through the exact parser ChatCompletionStream uses,
+// delivering each decoded response to `callback`.
+void ParseSseStream(
+    std::string_view raw,
+    std::function<void(const quantclaw::ChatCompletionResponse&)> callback,
+    std::shared_ptr<spdlog::logger> logger = nullptr) {
+  StreamContext ctx;
+  ctx.callback = std::move(callback);
+  ctx.logger = std::move(logger);
+  ctx.push(raw.data(), raw.size());
+}
+
+// QuantClaw messages -> OpenAI-format chat array (role demotion + alternation).
+nlohmann::json SerializeMessagesForTest(
+    const std::vector<quantclaw::Message>& messages) {
+  return ::SerializeMessages(messages);
+}
+
+// QuantClaw tool defs -> OpenAI function-calling schema.
+nlohmann::json ConvertToolsForTest(
+    const std::vector<nlohmann::json>& qc_tools) {
+  return ::ConvertTools(qc_tools);
+}
+
+}  // namespace quantclaw::llama_detail
 
 export namespace quantclaw {
 
