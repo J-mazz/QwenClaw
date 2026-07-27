@@ -12,6 +12,7 @@ module quantclaw.tools.tool_registry;
 import std;
 import nlohmann.json;
 
+import quantclaw.common.defer;
 import quantclaw.core.subagent;
 import quantclaw.core.cron_scheduler;
 import quantclaw.core.memory_search;
@@ -1344,8 +1345,17 @@ std::string ToolRegistry::claude_advisor_tool(const nlohmann::json& params) {
     prompt += "\n\n--- Context ---\n" + context;
 
   // Write the prompt to a temp file so it reaches the CLI via stdin and is
-  // never parsed by the shell.
-  fs::path tmp = fs::path(workspace_path_) / ".claude_advisor_prompt.txt";
+  // never parsed by the shell. The name is unique per call: a fixed name is
+  // clobbered when two sessions consult the advisor at once, and each would
+  // then read the other's prompt.
+  fs::path tmp = fs::path(workspace_path_) /
+                 (".claude_advisor_" + generate_id("prompt") + ".txt");
+  // Remove the prompt on every exit path, including the throws below and any
+  // exception out of exec_capture.
+  auto cleanup = MakeDefer([&tmp] {
+    std::error_code ec;
+    fs::remove(tmp, ec);
+  });
   {
     std::ofstream ofs(tmp, std::ios::binary | std::ios::trunc);
     if (!ofs)
@@ -1366,10 +1376,15 @@ std::string ToolRegistry::claude_advisor_tool(const nlohmann::json& params) {
                     shell_quote(kSystem) + " < " + shell_quote(tmp.string());
 
   logger_->info("claude_advisor: consulting {} (model {})", bin, model);
-  auto result = platform::exec_capture(cmd, timeout, workspace_path_);
 
-  std::error_code ec;
-  fs::remove(tmp, ec);
+  // The Claude CLI is a Node process: it reserves far more virtual address
+  // space than the default child ceiling and thinks for minutes on a hard
+  // question. Leave RLIMIT_AS unset and let the CPU ceiling follow the
+  // caller's timeout, or the advisor is killed before it answers.
+  platform::ExecLimits limits;
+  limits.max_address_space_bytes = 0;
+  limits.max_cpu_seconds = 0;  // derive from `timeout`
+  auto result = platform::exec_capture(cmd, timeout, workspace_path_, limits);
 
   if (result.exit_code == -1)
     throw std::runtime_error(

@@ -1,7 +1,11 @@
 // Copyright 2025 QuantClaw Contributors
 // SPDX-License-Identifier: Apache-2.0
 
+#include <unistd.h>
+
+#include <atomic>
 #include <filesystem>
+#include <fstream>
 #include <thread>
 
 #include <gtest/gtest.h>
@@ -221,4 +225,150 @@ TEST(PlatformService, WritePidFile) {
   EXPECT_EQ(svc.get_pid(), 12345);
   svc.remove_pid();
   EXPECT_EQ(svc.get_pid(), -1);
+}
+
+// --- exec_capture hardening ---
+//
+// Each of these covers a property that was silently wrong before: binary
+// output truncated at the first NUL, unbounded capture, concurrent calls
+// hanging on a leaked pipe write end, and rlimits too tight to run real tools.
+
+TEST(PlatformProcess, ExecCaptureKeepsBytesAfterEmbeddedNul) {
+  // printf writes a NUL between the two words. The old implementation
+  // NUL-terminated the read buffer and appended it as a C string, so
+  // everything from the NUL onward vanished.
+  auto result = exec_capture(R"(printf 'before\000after')", 10);
+  ASSERT_EQ(result.exit_code, 0);
+  EXPECT_EQ(result.output.size(), 12u) << "expected 'before\\0after' verbatim";
+  EXPECT_NE(result.output.find(std::string("after")), std::string::npos);
+  EXPECT_EQ(result.output[6], '\0');
+}
+
+TEST(PlatformProcess, ExecCaptureBoundsRunawayOutput) {
+  ExecLimits limits;
+  limits.max_output_bytes = 64 * 1024;
+  // `yes` never stops; without a cap this grows until the timeout kills it.
+  auto result = exec_capture("yes abcdefghijklmnop", 3, "", limits);
+  EXPECT_TRUE(result.output_truncated);
+  // Head + tail + the truncation marker, nothing like the gigabytes `yes`
+  // would otherwise have produced in three seconds.
+  EXPECT_LT(result.output.size(), limits.max_output_bytes + 1024);
+  EXPECT_NE(result.output.find("output truncated"), std::string::npos);
+}
+
+TEST(PlatformProcess, ExecCaptureKeepsHeadAndTail) {
+  ExecLimits limits;
+  limits.max_output_bytes = 4096;
+  auto result = exec_capture(
+      R"(echo FIRSTLINE; for i in $(seq 1 4000); do echo padding-$i; done; echo LASTLINE)",
+      20, "", limits);
+  ASSERT_EQ(result.exit_code, 0);
+  EXPECT_TRUE(result.output_truncated);
+  EXPECT_NE(result.output.find("FIRSTLINE"), std::string::npos)
+      << "head of the output must survive truncation";
+  EXPECT_NE(result.output.find("LASTLINE"), std::string::npos)
+      << "tail of the output must survive truncation";
+}
+
+TEST(PlatformProcess, ExecCaptureAllowsRealisticMemoryFootprint) {
+  // The old hardcoded RLIMIT_AS of 256 MB is below what many interpreters
+  // reserve at startup. Allocating 300 MB must succeed under the defaults.
+  auto result = exec_capture(
+      R"(sh -c 'a=$(head -c 1000000 /dev/zero | tr "\0" "x"); echo sized-ok')",
+      20);
+  EXPECT_EQ(result.exit_code, 0);
+  EXPECT_NE(result.output.find("sized-ok"), std::string::npos);
+}
+
+TEST(PlatformProcess, ExecCaptureCpuLimitTracksTimeout) {
+  // A 20 s timeout must not be silently capped at the old fixed 30 s CPU
+  // ceiling in a way that kills short work; this should simply succeed.
+  auto result = exec_capture("sleep 1; echo done", 20);
+  EXPECT_EQ(result.exit_code, 0);
+  EXPECT_NE(result.output.find("done"), std::string::npos);
+}
+
+TEST(PlatformProcess, ExecCaptureTimesOutCleanly) {
+  auto start = std::chrono::steady_clock::now();
+  auto result = exec_capture("sleep 30", 2);
+  auto elapsed = std::chrono::steady_clock::now() - start;
+  EXPECT_EQ(result.exit_code, -2) << "timeout is reported as -2";
+  EXPECT_LT(std::chrono::duration_cast<std::chrono::seconds>(elapsed).count(),
+            10);
+}
+
+TEST(PlatformProcess, ExecCaptureConcurrentCallsDoNotBlockEachOther) {
+  // Without O_CLOEXEC, a fork on one thread inherits another thread's pipe
+  // write end, so that thread's read never sees EOF and it runs to its
+  // timeout. With 8 threads doing quick work, a timeout means the leak is back.
+  constexpr int kThreads = 8;
+  std::atomic<int> ok{0};
+  std::atomic<int> timed_out{0};
+  std::atomic<bool> go{false};
+  std::vector<std::thread> threads;
+
+  for (int i = 0; i < kThreads; ++i) {
+    threads.emplace_back([&, i] {
+      while (!go.load(std::memory_order_acquire)) {
+        std::this_thread::yield();
+      }
+      for (int j = 0; j < 12; ++j) {
+        // Mix instant and slightly-slower children to widen the fork window.
+        auto r = exec_capture(
+            (j % 3 == 0) ? "sleep 0.2; echo t" + std::to_string(i)
+                         : "echo t" + std::to_string(i),
+            15);
+        if (r.exit_code == -2) {
+          timed_out.fetch_add(1, std::memory_order_relaxed);
+        } else if (r.exit_code == 0) {
+          ok.fetch_add(1, std::memory_order_relaxed);
+        }
+      }
+    });
+  }
+  go.store(true, std::memory_order_release);
+  for (auto& t : threads) {
+    t.join();
+  }
+
+  EXPECT_EQ(timed_out.load(), 0) << "a concurrent fork leaked our pipe write end";
+  EXPECT_EQ(ok.load(), kThreads * 12);
+}
+
+TEST(PlatformProcess, SpawnProcessAppliesEnvOverride) {
+  // env is now materialised before fork() and passed via execvpe, rather than
+  // calling the non-async-signal-safe setenv() in the child.
+  auto out = std::filesystem::temp_directory_path() /
+             ("qc_env_" + std::to_string(::getpid()) + ".txt");
+  auto pid = spawn_process(
+      {"sh", "-c", "printf '%s' \"$QC_TEST_VAR\" > " + out.string()},
+      {"QC_TEST_VAR=spawned-value"});
+  ASSERT_NE(pid, kInvalidPid);
+  EXPECT_EQ(wait_process(pid, 10000), 0);
+
+  std::ifstream f(out);
+  std::string contents((std::istreambuf_iterator<char>(f)), {});
+  EXPECT_EQ(contents, "spawned-value");
+
+  std::error_code ec;
+  std::filesystem::remove(out, ec);
+}
+
+TEST(PlatformProcess, SpawnProcessInheritsAmbientEnvironment) {
+  // Overriding one variable must not wipe the rest of the environment.
+  auto out = std::filesystem::temp_directory_path() /
+             ("qc_env2_" + std::to_string(::getpid()) + ".txt");
+  auto pid = spawn_process(
+      {"sh", "-c", "printf '%s' \"${HOME:-missing}\" > " + out.string()},
+      {"QC_TEST_VAR=irrelevant"});
+  ASSERT_NE(pid, kInvalidPid);
+  EXPECT_EQ(wait_process(pid, 10000), 0);
+
+  std::ifstream f(out);
+  std::string contents((std::istreambuf_iterator<char>(f)), {});
+  EXPECT_NE(contents, "missing");
+  EXPECT_FALSE(contents.empty());
+
+  std::error_code ec;
+  std::filesystem::remove(out, ec);
 }

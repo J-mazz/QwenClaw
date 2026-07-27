@@ -133,16 +133,62 @@ TEST_F(SandboxTest, ApplyResourceLimitsDoesNotThrow) {
 }
 
 #ifdef __linux__
-TEST_F(SandboxTest, ResourceLimitsAppliedInExecCapture) {
-  // Verify that resource limits are applied in the child spawned by
-  // exec_capture, not on the host process.
-  auto result = quantclaw::platform::exec_capture("ulimit -t", 5);
-  // The child should see the CPU soft limit (30 seconds).
+namespace {
+std::string trimmed(std::string s) {
+  while (!s.empty() && (s.back() == '\n' || s.back() == ' '))
+    s.pop_back();
+  return s;
+}
+}  // namespace
+
+// Limits are applied to the child spawned by exec_capture, never to the host
+// process — capping the gateway itself would be permanent.
+//
+// The CPU ceiling now follows the caller's wall-clock timeout instead of a
+// fixed 30 s. The old constant silently overrode any longer timeout a caller
+// asked for, which is what made the Claude advisor tool (300 s) unusable.
+TEST_F(SandboxTest, CpuLimitInChildTracksCallerTimeout) {
+  auto result = quantclaw::platform::exec_capture("ulimit -t", 7);
   EXPECT_EQ(result.exit_code, 0);
-  // Trim trailing whitespace.
-  std::string out = result.output;
-  while (!out.empty() && (out.back() == '\n' || out.back() == ' '))
-    out.pop_back();
-  EXPECT_EQ(out, "30");
+  EXPECT_EQ(trimmed(result.output), "7");
+
+  auto longer = quantclaw::platform::exec_capture("ulimit -t", 120);
+  EXPECT_EQ(longer.exit_code, 0);
+  EXPECT_EQ(trimmed(longer.output), "120")
+      << "a longer timeout must not be capped at the old fixed ceiling";
+}
+
+TEST_F(SandboxTest, ExplicitCpuLimitOverridesTimeout) {
+  quantclaw::platform::ExecLimits limits;
+  limits.max_cpu_seconds = 45;
+  auto result = quantclaw::platform::exec_capture("ulimit -t", 10, "", limits);
+  EXPECT_EQ(result.exit_code, 0);
+  EXPECT_EQ(trimmed(result.output), "45");
+}
+
+TEST_F(SandboxTest, AddressSpaceLimitIsAppliedAndDisablable) {
+  quantclaw::platform::ExecLimits limits;
+  limits.max_address_space_bytes = 2ULL * 1024 * 1024 * 1024;
+  auto capped = quantclaw::platform::exec_capture("ulimit -v", 5, "", limits);
+  EXPECT_EQ(capped.exit_code, 0);
+  EXPECT_EQ(trimmed(capped.output), "2097152");  // reported in KiB
+
+  // 0 means "no limit" — required for Node-based tools such as the Claude CLI,
+  // which reserve more virtual address space than any sane cap.
+  limits.max_address_space_bytes = 0;
+  auto uncapped = quantclaw::platform::exec_capture("ulimit -v", 5, "", limits);
+  EXPECT_EQ(uncapped.exit_code, 0);
+  EXPECT_EQ(trimmed(uncapped.output), "unlimited");
+}
+
+// The host process must never inherit the child's ceilings.
+TEST_F(SandboxTest, HostProcessLimitsUnchangedByExecCapture) {
+  struct rlimit before {};
+  ASSERT_EQ(getrlimit(RLIMIT_CPU, &before), 0);
+  (void)quantclaw::platform::exec_capture("true", 5);
+  struct rlimit after {};
+  ASSERT_EQ(getrlimit(RLIMIT_CPU, &after), 0);
+  EXPECT_EQ(before.rlim_cur, after.rlim_cur);
+  EXPECT_EQ(before.rlim_max, after.rlim_max);
 }
 #endif

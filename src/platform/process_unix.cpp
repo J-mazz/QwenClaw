@@ -7,6 +7,7 @@ module;
 
 #include <cerrno>
 #include <cstdlib>
+#include <fcntl.h>
 #include <poll.h>
 #include <sys/resource.h>
 #include <sys/wait.h>
@@ -26,30 +27,59 @@ ProcessId spawn_process(const std::vector<std::string>& args,
     return kInvalidPid;
   }
 
+  // Everything the child needs is built BEFORE fork(). Between fork() and
+  // exec() only async-signal-safe calls are legal, and in a multi-threaded
+  // process that is not pedantry: the old code called setenv() there, which
+  // allocates and takes a lock some other thread may have held at fork time,
+  // so the child could deadlock before ever reaching exec.
+  std::vector<std::string> merged_env;
+  for (char** e = environ; e && *e; ++e) {
+    merged_env.emplace_back(*e);
+  }
+  for (const auto& e : env) {
+    auto eq = e.find('=');
+    if (eq == std::string::npos) {
+      continue;
+    }
+    // Compare including the '=' so PATH_EXTRA does not shadow PATH.
+    std::string key = e.substr(0, eq + 1);
+    auto it = std::find_if(
+        merged_env.begin(), merged_env.end(),
+        [&](const std::string& existing) { return existing.starts_with(key); });
+    if (it != merged_env.end()) {
+      *it = e;
+    } else {
+      merged_env.push_back(e);
+    }
+  }
+
+  std::vector<char*> c_args;
+  c_args.reserve(args.size() + 1);
+  for (const auto& a : args) {
+    c_args.push_back(const_cast<char*>(a.c_str()));
+  }
+  c_args.push_back(nullptr);
+
+  std::vector<char*> c_env;
+  c_env.reserve(merged_env.size() + 1);
+  for (const auto& e : merged_env) {
+    c_env.push_back(const_cast<char*>(e.c_str()));
+  }
+  c_env.push_back(nullptr);
+
   pid_t pid = fork();
   if (pid < 0) {
     return kInvalidPid;
   }
 
   if (pid == 0) {
-    // Child process
+    // Child process — async-signal-safe calls only from here to exec.
     if (!working_dir.empty()) {
       if (chdir(working_dir.c_str()) != 0) {
         _exit(1);
       }
     }
-    for (const auto& e : env) {
-      auto eq = e.find('=');
-      if (eq != std::string::npos) {
-        setenv(e.substr(0, eq).c_str(), e.substr(eq + 1).c_str(), 1);
-      }
-    }
-    std::vector<char*> c_args;
-    for (const auto& a : args) {
-      c_args.push_back(const_cast<char*>(a.c_str()));
-    }
-    c_args.push_back(nullptr);
-    execvp(c_args[0], c_args.data());
+    execvpe(c_args[0], c_args.data(), c_env.data());
     _exit(127);
   }
 
@@ -121,12 +151,20 @@ int wait_process(ProcessId pid, int timeout_ms) {
 }
 
 ExecResult exec_capture(const std::string& command, int timeout_seconds,
-                        const std::string& working_dir) {
+                        const std::string& working_dir,
+                        const ExecLimits& limits) {
   ExecResult result;
 
   // Create a pipe for the child's stdout+stderr.
+  //
+  // O_CLOEXEC is load-bearing under concurrency: exec_capture runs on many
+  // agent threads at once, and a plain pipe() leaks its write end into every
+  // child forked by another thread in the window between our pipe() and our
+  // fork(). Our read end then never sees EOF — the unrelated child holds the
+  // pipe open — so the call hangs until its timeout. dup2() below clears
+  // O_CLOEXEC on the descriptors the child actually needs.
   int pipefd[2];
-  if (pipe(pipefd) != 0) {
+  if (pipe2(pipefd, O_CLOEXEC) != 0) {
     result.exit_code = -1;
     return result;
   }
@@ -157,18 +195,36 @@ ExecResult exec_capture(const std::string& command, int timeout_seconds,
 
     // Apply resource limits in the child (not the host process).
     // Only on Linux — macOS has different rlimit semantics for some resources.
+    //
+    // These were previously hardcoded at 256 MB address space and 30 s CPU,
+    // which is below the floor of ordinary tooling: node reserves more virtual
+    // address space than that at startup, so anything JS-based died instantly,
+    // and a 30 s CPU cap silently overrode any longer timeout the caller asked
+    // for. They are now caller-supplied, and the CPU ceiling defaults to
+    // tracking the wall-clock timeout instead of a fixed number.
 #ifdef __linux__
-    struct rlimit cpu_lim = {30, 60};
-    if (setrlimit(RLIMIT_CPU, &cpu_lim) != 0) {
-      _exit(126);  // Resource limit setup failed
+    if (limits.max_cpu_seconds > 0 || timeout_seconds > 0) {
+      rlim_t soft = limits.max_cpu_seconds > 0
+                        ? static_cast<rlim_t>(limits.max_cpu_seconds)
+                        : static_cast<rlim_t>(timeout_seconds);
+      struct rlimit cpu_lim = {soft, soft + 30};
+      if (setrlimit(RLIMIT_CPU, &cpu_lim) != 0) {
+        _exit(126);  // Resource limit setup failed
+      }
     }
-    struct rlimit mem_lim = {256ULL * 1024 * 1024, 512ULL * 1024 * 1024};
-    if (setrlimit(RLIMIT_AS, &mem_lim) != 0) {
-      _exit(126);
+    if (limits.max_address_space_bytes > 0) {
+      rlim_t as = static_cast<rlim_t>(limits.max_address_space_bytes);
+      struct rlimit mem_lim = {as, as};
+      if (setrlimit(RLIMIT_AS, &mem_lim) != 0) {
+        _exit(126);
+      }
     }
-    struct rlimit fsz_lim = {64ULL * 1024 * 1024, 128ULL * 1024 * 1024};
-    if (setrlimit(RLIMIT_FSIZE, &fsz_lim) != 0) {
-      _exit(126);
+    if (limits.max_file_size_bytes > 0) {
+      rlim_t fsz = static_cast<rlim_t>(limits.max_file_size_bytes);
+      struct rlimit fsz_lim = {fsz, fsz};
+      if (setrlimit(RLIMIT_FSIZE, &fsz_lim) != 0) {
+        _exit(126);
+      }
     }
     // NOTE: RLIMIT_NPROC is intentionally NOT set here. It is a per-real-UID
     // limit counting *every* process the user owns, not just this command's
@@ -190,7 +246,14 @@ ExecResult exec_capture(const std::string& command, int timeout_seconds,
                       ? start + std::chrono::seconds(timeout_seconds)
                       : std::chrono::steady_clock::time_point::max();
 
-  char buffer[1024];
+  // 64 KiB rather than 1 KiB: pipe capacity is 64 KiB on Linux, so this reads
+  // a full pipeful per syscall instead of 64 of them.
+  std::array<char, 64 * 1024> buffer;
+  // Head + tail ring, so a chatty command stays bounded without losing the
+  // beginning (usually the command echo) or the end (usually the error).
+  std::string tail;
+  const std::size_t cap = limits.max_output_bytes;
+  const std::size_t head_cap = cap / 2;
   bool timed_out = false;
   int child_status = -1;  // Track child exit status; -1 means not yet reaped
   bool child_reaped = false;
@@ -229,7 +292,7 @@ ExecResult exec_capture(const std::string& command, int timeout_seconds,
       break;  // poll timed out
     }
 
-    ssize_t n = read(pipefd[0], buffer, sizeof(buffer) - 1);
+    ssize_t n = read(pipefd[0], buffer.data(), buffer.size());
     if (n < 0) {
       if (errno == EINTR) {
         continue;
@@ -251,9 +314,33 @@ ExecResult exec_capture(const std::string& command, int timeout_seconds,
       std::this_thread::sleep_for(std::chrono::milliseconds(10));
       continue;
     }
-    buffer[n] = '\0';
-    result.output += buffer;
+    // append(ptr, n), never buffer-as-C-string: the previous code wrote a NUL
+    // at buffer[n] and appended it as a char*, silently discarding everything
+    // after the first embedded NUL in binary output.
+    std::string_view chunk(buffer.data(), static_cast<std::size_t>(n));
+    if (cap == 0) {
+      result.output.append(chunk);
+      continue;
+    }
+    if (result.output.size() < head_cap) {
+      std::size_t take = std::min(chunk.size(), head_cap - result.output.size());
+      result.output.append(chunk.substr(0, take));
+      chunk.remove_prefix(take);
+    }
+    if (!chunk.empty()) {
+      tail.append(chunk);
+      if (tail.size() > cap - head_cap) {
+        tail.erase(0, tail.size() - (cap - head_cap));
+        result.output_truncated = true;
+      }
+    }
   }
+
+  if (result.output_truncated) {
+    result.output += "\n... [output truncated: exceeded " +
+                     std::to_string(cap) + " bytes] ...\n";
+  }
+  result.output += tail;
 
   // DEFER will close pipefd[0] at function exit.
 
