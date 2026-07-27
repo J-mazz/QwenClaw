@@ -117,6 +117,14 @@ class GatewayServer : public quantclaw::Noncopyable {
   }
   size_t GetConnectionCount() const;
   int64_t GetUptimeSeconds() const;
+
+  // Number of RPC methods currently registered. Replaces a hand-maintained
+  // tally in register_rpc_handlers that had to be edited by hand whenever a
+  // handler was added, and had drifted from reality.
+  std::size_t RegisteredHandlerCount() const {
+    std::lock_guard<std::mutex> lock(handlers_mutex_);
+    return handlers_.size();
+  }
   nlohmann::json BuildSnapshot() const;
 
   // Configure authentication
@@ -184,7 +192,7 @@ class GatewayServer : public quantclaw::Noncopyable {
   std::unordered_map<std::string, std::shared_ptr<ix::WebSocket>>
       ws_connections_;
 
-  std::mutex handlers_mutex_;
+  mutable std::mutex handlers_mutex_;
   std::unordered_map<std::string, RpcHandler> handlers_;
 
   // Security

@@ -251,6 +251,12 @@ set(QUANTCLAW_CORE_SOURCES
     src/gateway/gateway_server.cpp
     src/gateway/gateway_client.cpp
     src/gateway/rpc_handlers.cpp
+    src/gateway/rpc_handlers_core.cpp
+    src/gateway/rpc_handlers_sessions.cpp
+    src/gateway/rpc_handlers_channels.cpp
+    src/gateway/rpc_handlers_openclaw.cpp
+    src/gateway/rpc_handlers_skills.cpp
+    src/gateway/rpc_handlers_plugins.cpp
     src/gateway/daemon_manager.cpp
     src/gateway/command_queue.cpp
     # Session
@@ -340,6 +346,7 @@ set(QUANTCLAW_CORE_MODULE_SOURCES
     src/cli/onboard_commands.cppm
     src/cli/session_commands.cppm
     src/gateway/daemon_manager.cppm
+    src/gateway/rpc_helpers.cppm
     src/gateway/rpc_handlers.cppm
     src/gateway/protocol.cppm
     src/gateway/gateway_server.cppm
