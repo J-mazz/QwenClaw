@@ -24,6 +24,95 @@ import quantclaw.web.web_server;
 
 namespace quantclaw::web {
 
+// --- SSE bridge ---
+//
+// Bridges the agent's push-based event callback to httplib's pull-based
+// chunked content provider.
+//
+// Both SSE routes previously used an unbounded std::queue and a cv.wait() with
+// no timeout. If the HTTP client hung up mid-turn, the detached worker kept
+// running the whole agent turn and kept pushing into a queue nobody would ever
+// drain, and the serving thread could block forever if the worker died without
+// setting `finished`. Neither had any notion of the consumer going away.
+//
+// Note on scope: the agent turn itself still runs to completion after a
+// disconnect. AgentLoop::Stop() is per-loop, not per-turn, and the loop
+// instance is shared across sessions, so cancelling one client's turn here
+// would abort everyone's. What this does guarantee is that a vanished consumer
+// costs bounded memory and never wedges a serving thread.
+struct SseStream {
+  // Roughly one screenful of backlog. Beyond this the oldest chunks are
+  // dropped: a consumer that far behind is gone or hopeless, and retaining
+  // the newest output is more useful than the oldest.
+  static constexpr std::size_t kMaxQueuedBytes = 4 * 1024 * 1024;
+  static constexpr auto kWaitTimeout = std::chrono::seconds(30);
+
+  std::mutex mu;
+  std::condition_variable cv;
+  std::queue<std::string> chunks;
+  std::size_t queued_bytes = 0;
+  bool finished = false;
+  bool dropped = false;
+  std::atomic<bool> cancelled{false};
+
+  // Producer side. Returns false once the consumer is gone, so callers can
+  // stop formatting payloads nobody will read.
+  bool Push(std::string chunk) {
+    if (cancelled.load(std::memory_order_acquire)) {
+      return false;
+    }
+    std::lock_guard<std::mutex> lock(mu);
+    queued_bytes += chunk.size();
+    chunks.push(std::move(chunk));
+    while (queued_bytes > kMaxQueuedBytes && chunks.size() > 1) {
+      queued_bytes -= chunks.front().size();
+      chunks.pop();
+      dropped = true;
+    }
+    cv.notify_one();
+    return true;
+  }
+
+  void Finish() {
+    {
+      std::lock_guard<std::mutex> lock(mu);
+      finished = true;
+    }
+    cv.notify_one();
+  }
+
+  // Consumer side, called by httplib. Returns false to end the response.
+  bool Drain(httplib::DataSink& sink) {
+    std::unique_lock<std::mutex> lock(mu);
+    // Bounded wait: a producer that dies without calling Finish() must not
+    // pin this thread for the lifetime of the process.
+    cv.wait_for(lock, kWaitTimeout,
+                [this] { return !chunks.empty() || finished; });
+
+    while (!chunks.empty()) {
+      auto chunk = std::move(chunks.front());
+      chunks.pop();
+      queued_bytes -= chunk.size();
+      lock.unlock();
+      if (!sink.write(chunk.data(), chunk.size())) {
+        // Client hung up. Tell the producer to stop queueing.
+        cancelled.store(true, std::memory_order_release);
+        return false;
+      }
+      lock.lock();
+    }
+
+    if (finished) {
+      sink.done();
+      return false;
+    }
+    if (cancelled.load(std::memory_order_acquire)) {
+      return false;
+    }
+    return true;
+  }
+};
+
 // --- Helpers ---
 
 static void json_ok(httplib::Response& res, const nlohmann::json& data) {
@@ -234,15 +323,7 @@ void register_api_routes(
           return;
         }
 
-        // Shared state for bridging the push-based agent callback to
-        // httplib's pull-based chunked content provider.
-        struct StreamState {
-          std::mutex mu;
-          std::condition_variable cv;
-          std::queue<std::string> chunks;
-          bool finished = false;
-        };
-        auto state = std::make_shared<StreamState>();
+        auto state = std::make_shared<SseStream>();
 
         // Prepare session and history before spawning the worker thread
         session_manager->GetOrCreate(session_key, "", "api");
@@ -256,9 +337,13 @@ void register_api_routes(
           }
         }
 
-        session_manager->AppendMessage(session_key, "user", message);
         std::string system_prompt = prompt_builder->BuildFull();
 
+        // Read the prior history BEFORE appending this message. The previous
+        // order appended, re-read the whole history back from disk, then
+        // popped the message it had just written — an extra round-trip that
+        // was also wrong under concurrent appends to the same session, where
+        // the last record need not be the one this request added.
         auto history = session_manager->GetHistory(session_key, 50);
         std::vector<quantclaw::Message> llm_history;
         llm_history.reserve(history.size());
@@ -268,9 +353,8 @@ void register_api_routes(
           m.content = smsg.content;
           llm_history.push_back(std::move(m));
         }
-        if (!llm_history.empty()) {
-          llm_history.pop_back();
-        }
+
+        session_manager->AppendMessage(session_key, "user", message);
 
         // Start agent processing in a background thread
         std::thread worker([state, session_manager, agent_loop, message,
@@ -280,11 +364,8 @@ void register_api_routes(
             auto new_messages = agent_loop->ProcessMessageStream(
                 message, llm_history, system_prompt,
                 [&state](const quantclaw::AgentEvent& event) {
-                  std::string sse = "event: " + event.type +
-                                    "\ndata: " + event.data.dump() + "\n\n";
-                  std::lock_guard<std::mutex> lock(state->mu);
-                  state->chunks.push(std::move(sse));
-                  state->cv.notify_one();
+                  state->Push("event: " + event.type +
+                              "\ndata: " + event.data.dump() + "\n\n");
                 });
 
             // Persist new messages to the session transcript
@@ -310,21 +391,12 @@ void register_api_routes(
             // Send terminal "done" event
             nlohmann::json done_data = {{"sessionKey", session_key},
                                         {"response", final_response}};
-            std::string done_sse =
-                "event: done\ndata: " + done_data.dump() + "\n\n";
-
-            std::lock_guard<std::mutex> lock(state->mu);
-            state->chunks.push(std::move(done_sse));
-            state->finished = true;
-            state->cv.notify_one();
+            state->Push("event: done\ndata: " + done_data.dump() + "\n\n");
+            state->Finish();
           } catch (const std::exception& e) {
             nlohmann::json err = {{"error", e.what()}};
-            std::string err_sse = "event: error\ndata: " + err.dump() + "\n\n";
-
-            std::lock_guard<std::mutex> lock(state->mu);
-            state->chunks.push(std::move(err_sse));
-            state->finished = true;
-            state->cv.notify_one();
+            state->Push("event: error\ndata: " + err.dump() + "\n\n");
+            state->Finish();
           }
         });
         worker.detach();
@@ -337,22 +409,7 @@ void register_api_routes(
         res.set_chunked_content_provider(
             "text/event-stream",
             [state](size_t /*offset*/, httplib::DataSink& sink) -> bool {
-              std::unique_lock<std::mutex> lock(state->mu);
-              state->cv.wait(lock, [&state] {
-                return !state->chunks.empty() || state->finished;
-              });
-
-              while (!state->chunks.empty()) {
-                auto& chunk = state->chunks.front();
-                sink.write(chunk.data(), chunk.size());
-                state->chunks.pop();
-              }
-
-              if (state->finished) {
-                sink.done();
-                return false;
-              }
-              return true;
+              return state->Drain(sink);
             });
       });
 
@@ -557,13 +614,7 @@ void register_api_routes(
 
           if (stream) {
             // Streaming response (SSE format matching OpenAI)
-            struct StreamState {
-              std::mutex mu;
-              std::condition_variable cv;
-              std::queue<std::string> chunks;
-              bool finished = false;
-            };
-            auto state = std::make_shared<StreamState>();
+            auto state = std::make_shared<SseStream>();
             std::string resp_id =
                 "chatcmpl-qc-" + std::to_string(std::chrono::system_clock::now()
                                                     .time_since_epoch()
@@ -593,26 +644,17 @@ void register_api_routes(
                             {{{"index", 0},
                               {"delta", {{"content", event.data["text"]}}},
                               {"finish_reason", nullptr}}});
-                        std::string sse = "data: " + chunk.dump() + "\n\n";
-                        std::lock_guard<std::mutex> lock(state->mu);
-                        state->chunks.push(std::move(sse));
-                        state->cv.notify_one();
+                        state->Push("data: " + chunk.dump() + "\n\n");
                       }
                     },
                     session_key);
 
                 // Send [DONE] marker
-                {
-                  std::lock_guard<std::mutex> lock(state->mu);
-                  state->chunks.push("data: [DONE]\n\n");
-                  state->finished = true;
-                  state->cv.notify_one();
-                }
+                state->Push("data: [DONE]\n\n");
+                state->Finish();
               } catch (const std::exception& e) {
                 logger->error("OpenAI stream error: {}", e.what());
-                std::lock_guard<std::mutex> lock(state->mu);
-                state->finished = true;
-                state->cv.notify_one();
+                state->Finish();
               }
             });
             worker.detach();
@@ -624,20 +666,7 @@ void register_api_routes(
             res.set_chunked_content_provider(
                 "text/event-stream",
                 [state](size_t /*offset*/, httplib::DataSink& sink) -> bool {
-                  std::unique_lock<std::mutex> lock(state->mu);
-                  state->cv.wait(lock, [&state] {
-                    return !state->chunks.empty() || state->finished;
-                  });
-                  while (!state->chunks.empty()) {
-                    auto& c = state->chunks.front();
-                    sink.write(c.data(), c.size());
-                    state->chunks.pop();
-                  }
-                  if (state->finished) {
-                    sink.done();
-                    return false;
-                  }
-                  return true;
+                  return state->Drain(sink);
                 });
           } else {
             // Non-streaming response

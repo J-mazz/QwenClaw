@@ -200,6 +200,15 @@ class GatewayServer : public quantclaw::Noncopyable {
   };
   std::vector<AsyncTask> async_threads_;
   std::mutex async_threads_mutex_;
+
+  // Ceiling on concurrently-running async RPC handlers (agent turns).
+  //
+  // Every such request used to spawn a fresh std::thread with no cap, so a
+  // client could create thousands — each with its own stack and its own
+  // provider connection — until the process fell over. Past this many in
+  // flight, further requests are rejected with a retryable error rather than
+  // being accepted and then failing in a less legible way.
+  static constexpr std::size_t kMaxConcurrentAsyncHandlers = 32;
 };
 
 }  // namespace quantclaw::gateway

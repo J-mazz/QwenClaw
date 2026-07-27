@@ -440,6 +440,34 @@ void GatewayServer::handle_rpc_request(const std::string& conn_id,
   };
 
   if (kAsyncMethods.count(request.method)) {
+    // Reap finished threads and admission-check before spawning another.
+    {
+      std::lock_guard<std::mutex> lock(async_threads_mutex_);
+      for (auto& task : async_threads_) {
+        if (task.done->load(std::memory_order_acquire) &&
+            task.thread.joinable()) {
+          task.thread.join();
+        }
+      }
+      async_threads_.erase(
+          std::remove_if(async_threads_.begin(), async_threads_.end(),
+                         [](const AsyncTask& task) {
+                           return !task.thread.joinable();
+                         }),
+          async_threads_.end());
+
+      if (async_threads_.size() >= kMaxConcurrentAsyncHandlers) {
+        logger_->warn("Async handler limit reached ({}), rejecting {}",
+                      kMaxConcurrentAsyncHandlers, request.method);
+        auto resp = RpcResponse::failure(
+            request.id,
+            "Server busy: too many concurrent agent requests. Retry shortly.",
+            "SERVER_BUSY", /*retryable=*/true, /*retry_after_ms=*/2000);
+        ws.send(resp.ToJson().dump());
+        return;
+      }
+    }
+
     // Capture everything by value; ws reference would dangle.
     std::string req_id = request.id;
     std::string req_method = request.method;
@@ -459,23 +487,9 @@ void GatewayServer::handle_rpc_request(const std::string& conn_id,
       }
       done_flag->store(true, std::memory_order_release);
     });
-    // Track thread for graceful shutdown
     {
       std::lock_guard<std::mutex> lock(async_threads_mutex_);
       async_threads_.push_back({std::move(t), done_flag});
-      // Reap completed threads: join those marked done, then erase
-      for (auto& task : async_threads_) {
-        if (task.done->load(std::memory_order_acquire) &&
-            task.thread.joinable()) {
-          task.thread.join();
-        }
-      }
-      async_threads_.erase(
-          std::remove_if(async_threads_.begin(), async_threads_.end(),
-                         [](const AsyncTask& task) {
-                           return !task.thread.joinable();
-                         }),
-          async_threads_.end());
     }
     return;
   }
