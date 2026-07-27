@@ -211,17 +211,49 @@ TEST_F(ToolRegistryTest, RegisterChainTool) {
   EXPECT_TRUE(tool_registry_->HasTool("chain"));
 }
 
-// --- schema count ---
+// --- schema coverage ---
+//
+// Asserts on identity rather than a magic count. The previous version hardcoded
+// 12/13, so adding any unrelated tool failed this test (and the equivalent one
+// in test_mcp_integration) while telling you nothing about what broke.
 
-TEST_F(ToolRegistryTest, SchemaCountMatchesRegistered) {
+TEST_F(ToolRegistryTest, EveryBuiltinToolHasASchema) {
+  static constexpr std::array kExpected = {
+      "read",    "write",       "edit",       "exec",         "bash",
+      "process", "apply_patch", "message",    "web_search",   "web_fetch",
+      "memory_search", "memory_get"};
+
   auto schemas = tool_registry_->GetToolSchemas();
-  EXPECT_EQ(schemas.size(),
-            12u);  // read, write, edit, exec, bash, apply_patch, process,
-                   // message, web_search, web_fetch, memory_search, memory_get
+  std::set<std::string> names;
+  for (const auto& s : schemas) {
+    names.insert(s.name);
+  }
 
+  for (const auto* expected : kExpected) {
+    EXPECT_TRUE(names.count(expected) > 0) << "missing schema for " << expected;
+    EXPECT_TRUE(tool_registry_->HasTool(expected))
+        << "schema without handler: " << expected;
+  }
+
+  // Every registered schema must be executable and vice versa — the invariant
+  // the count was standing in for.
+  for (const auto& s : schemas) {
+    EXPECT_TRUE(tool_registry_->HasTool(s.name))
+        << "schema without handler: " << s.name;
+  }
+}
+
+TEST_F(ToolRegistryTest, RegisteringChainAddsExactlyOneSchema) {
+  auto before = tool_registry_->GetToolSchemas().size();
   tool_registry_->RegisterChainTool();
-  schemas = tool_registry_->GetToolSchemas();
-  EXPECT_EQ(schemas.size(), 13u);
+  auto after = tool_registry_->GetToolSchemas().size();
+
+  EXPECT_EQ(after, before + 1);
+  EXPECT_TRUE(tool_registry_->HasTool("chain"));
+
+  // Re-registration replaces rather than duplicates.
+  tool_registry_->RegisterChainTool();
+  EXPECT_EQ(tool_registry_->GetToolSchemas().size(), after);
 }
 
 // --- schema has name and description ---

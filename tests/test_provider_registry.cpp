@@ -136,7 +136,10 @@ TEST(ProviderRegistryTest, GetProviderCreatesInstance) {
 
   auto provider = reg->GetProvider("local");
   ASSERT_NE(provider, nullptr);
-  EXPECT_EQ(provider->GetProviderName(), "anthropic");
+  // The "local" factory builds a LlamaProvider, which names itself "local".
+  // This asserted "anthropic" — it predates the local builtin factory, back
+  // when every id fell through to the Anthropic provider.
+  EXPECT_EQ(provider->GetProviderName(), "local");
 
   // Second call returns same instance
   auto provider2 = reg->GetProvider("local");
@@ -214,7 +217,13 @@ TEST(ProviderRegistryTest, LocalBuiltinFactoryWorks) {
 
   auto provider = reg->GetProvider("local");
   ASSERT_NE(provider, nullptr);
-  EXPECT_EQ(provider->GetProviderName(), "anthropic");
+  EXPECT_EQ(provider->GetProviderName(), "local");
+
+  // The "anthropic" id is a separate builtin and still resolves to its own
+  // provider — which is what makes the assertion above meaningful.
+  auto anthropic = reg->GetProvider("anthropic");
+  ASSERT_NE(anthropic, nullptr);
+  EXPECT_EQ(anthropic->GetProviderName(), "anthropic");
 }
 
 TEST(ProviderRegistryTest, LocalOpenAIAliasNotRegistered) {

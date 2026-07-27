@@ -73,9 +73,22 @@ TEST_F(MCPIntegrationTest, ListTools) {
 
   EXPECT_TRUE(response.contains("result"));
   EXPECT_TRUE(response["result"].contains("tools"));
-  EXPECT_EQ(response["result"]["tools"].size(),
-            12u);  // read, write, edit, exec, bash, apply_patch, process,
-                   // message, web_search, web_fetch, memory_search, memory_get
+
+  // Asserts that the MCP surface mirrors the registry, rather than pinning a
+  // count that any newly added tool would break.
+  std::set<std::string> exposed;
+  for (const auto& t : response["result"]["tools"]) {
+    exposed.insert(t.value("name", std::string{}));
+  }
+  std::set<std::string> registered;
+  for (const auto& s : tool_registry_->GetToolSchemas()) {
+    registered.insert(s.name);
+  }
+  EXPECT_EQ(exposed, registered)
+      << "tools/list must expose exactly the registered tools";
+  EXPECT_FALSE(exposed.empty());
+  EXPECT_TRUE(exposed.count("read") > 0);
+  EXPECT_TRUE(exposed.count("exec") > 0);
 }
 
 TEST_F(MCPIntegrationTest, CallReadFileTool) {
