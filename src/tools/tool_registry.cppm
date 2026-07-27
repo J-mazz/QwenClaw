@@ -25,7 +25,12 @@ class ToolRegistry {
 	struct ToolSchema {
 		std::string name;
 		std::string description;
+		// Serialized form, kept for consumers that forward it verbatim (MCP).
 		std::string parameters_json;
+		// Same value pre-parsed. The agent loop rebuilds the tool array on every
+		// iteration of every turn and used to re-parse each schema string each
+		// time; parsing once at registration removes that from the hot path.
+		nlohmann::json parameters;
 	};
 
 	// Background process session (for 'process' tool)

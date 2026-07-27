@@ -39,7 +39,7 @@ void MemorySearch::IndexDirectory(const std::filesystem::path& dir) {
 
   // Recompute average document length and inverted DF index for BM25
   recompute_stats_locked();
-  rebuild_df_index();
+  rebuild_index();
 
   logger_->info("Indexed {} entries from {}", entries_.size(), dir.string());
 }
@@ -58,7 +58,7 @@ void MemorySearch::IndexFile(const std::filesystem::path& file) {
   std::unique_lock lock(mu_);
   index_file_locked(file);
   recompute_stats_locked();
-  rebuild_df_index();
+  rebuild_index();
 }
 
 void MemorySearch::index_file_locked(const std::filesystem::path& file) {
@@ -115,30 +115,66 @@ std::vector<MemorySearchResult> MemorySearch::Search(const std::string& query,
   if (query_tokens.empty())
     return {};
 
-  // Held across scoring: `scored` below stores raw IndexEntry pointers.
   std::shared_lock lock(mu_);
 
-  std::vector<std::pair<double, const IndexEntry*>> scored;
-  for (const auto& entry : entries_) {
-    double s = score_entry(entry, query_tokens);
-    if (s > 0) {
-      scored.push_back({s, &entry});
+  if (entries_.empty() || total_documents_ == 0) {
+    return {};
+  }
+
+  // Walk the postings lists for the query terms only. The previous version
+  // scored every document in the index and rebuilt each one's term-frequency
+  // map from all of its tokens first — O(N * doc_len) per query even when a
+  // term appeared in one document.
+  const double N = static_cast<double>(total_documents_);
+  std::unordered_map<std::uint32_t, double> scores;
+
+  for (const auto& qt : query_tokens) {
+    auto it = postings_.find(qt);
+    if (it == postings_.end()) {
+      continue;
+    }
+    const auto& plist = it->second;
+    const double df = static_cast<double>(plist.size());
+    const double idf = std::log((N - df + 0.5) / (df + 0.5) + 1.0);
+
+    for (const auto& p : plist) {
+      const auto& entry = entries_[p.entry_index];
+      const double doc_len = static_cast<double>(entry.tokens.size());
+      const double avgdl = avg_doc_length_ > 0 ? avg_doc_length_ : doc_len;
+      const double f = static_cast<double>(p.term_frequency);
+      const double tf_component =
+          (f * (kBM25_k1 + 1.0)) /
+          (f + kBM25_k1 * (1.0 - kBM25_b + kBM25_b * doc_len / avgdl));
+      scores[p.entry_index] += idf * tf_component;
     }
   }
 
-  // Sort by score descending
-  std::sort(scored.begin(), scored.end(),
-            [](const auto& a, const auto& b) { return a.first > b.first; });
+  std::vector<std::pair<double, std::uint32_t>> scored;
+  scored.reserve(scores.size());
+  for (const auto& [idx, s] : scores) {
+    if (s > 0) {
+      scored.push_back({s, idx});
+    }
+  }
+
+  // Partial sort: only the top-k need to be ordered, not the whole candidate
+  // set.
+  const std::size_t k =
+      std::min<std::size_t>(std::max(max_results, 0), scored.size());
+  std::partial_sort(scored.begin(), scored.begin() + k, scored.end(),
+                    [](const auto& a, const auto& b) {
+                      if (a.first != b.first) {
+                        return a.first > b.first;
+                      }
+                      return a.second < b.second;  // stable across runs
+                    });
 
   std::vector<MemorySearchResult> results;
-  int count = std::min(max_results, static_cast<int>(scored.size()));
-  for (int i = 0; i < count; ++i) {
-    MemorySearchResult r;
-    r.source = scored[i].second->filepath;
-    r.content = scored[i].second->content;
-    r.score = scored[i].first;
-    r.line_number = scored[i].second->line_number;
-    results.push_back(std::move(r));
+  results.reserve(k);
+  for (std::size_t i = 0; i < k; ++i) {
+    const auto& entry = entries_[scored[i].second];
+    results.push_back({entry.filepath, entry.content, scored[i].first,
+                       entry.line_number});
   }
   return results;
 }
@@ -359,19 +395,20 @@ void MemorySearch::Clear() {
   entries_.clear();
   total_documents_ = 0;
   avg_doc_length_ = 0;
-  df_index_.clear();
+  postings_.clear();
   vector_index_.Clear();
 }
 
-void MemorySearch::rebuild_df_index() {
-  df_index_.clear();
-  for (const auto& entry : entries_) {
-    // Count each unique term once per document
-    std::unordered_set<std::string> seen;
-    for (const auto& t : entry.tokens) {
-      if (seen.insert(t).second) {
-        df_index_[t]++;
-      }
+void MemorySearch::rebuild_index() {
+  postings_.clear();
+  std::unordered_map<std::string, std::uint32_t> tf;
+  for (std::size_t i = 0; i < entries_.size(); ++i) {
+    tf.clear();
+    for (const auto& t : entries_[i].tokens) {
+      tf[t]++;
+    }
+    for (const auto& [term, count] : tf) {
+      postings_[term].push_back({static_cast<std::uint32_t>(i), count});
     }
   }
 }
@@ -396,51 +433,5 @@ std::vector<std::string> MemorySearch::tokenize(const std::string& text) {
   return tokens;
 }
 
-double
-MemorySearch::score_entry(const IndexEntry& entry,
-                          const std::vector<std::string>& query_tokens) const {
-  if (entry.tokens.empty() || total_documents_ == 0)
-    return 0;
-
-  // Build term frequency map for the entry
-  std::unordered_map<std::string, int> tf;
-  for (const auto& t : entry.tokens) {
-    tf[t]++;
-  }
-
-  double doc_len = static_cast<double>(entry.tokens.size());
-  double avgdl = avg_doc_length_ > 0 ? avg_doc_length_ : doc_len;
-  double N = static_cast<double>(total_documents_);
-
-  // BM25 scoring: score(D, Q) = Σ IDF(qi) * (f(qi,D) * (k1+1)) / (f(qi,D) +
-  // k1*(1-b+b*|D|/avgDL))
-  double score = 0;
-
-  for (const auto& qt : query_tokens) {
-    auto it = tf.find(qt);
-    if (it == tf.end())
-      continue;
-
-    double f = static_cast<double>(it->second);  // term frequency in doc
-
-    // O(1) lookup from precomputed inverted index (was O(N*T) per call)
-    int df = 0;
-    auto df_it = df_index_.find(qt);
-    if (df_it != df_index_.end())
-      df = df_it->second;
-
-    // IDF component: log((N - df + 0.5) / (df + 0.5) + 1)
-    double idf = std::log((N - df + 0.5) / (df + 0.5) + 1.0);
-
-    // BM25 TF component
-    double tf_component =
-        (f * (kBM25_k1 + 1.0)) /
-        (f + kBM25_k1 * (1.0 - kBM25_b + kBM25_b * doc_len / avgdl));
-
-    score += idf * tf_component;
-  }
-
-  return score;
-}
 
 }  // namespace quantclaw

@@ -244,16 +244,14 @@ std::vector<nlohmann::json> AgentLoop::build_tool_definitions() const {
   std::vector<nlohmann::json> tools;
   tools.reserve(schemas.size());
   for (const auto& schema : schemas) {
-    auto params_json =
-        nlohmann::json::parse(schema.parameters_json, nullptr, false);
-    if (params_json.is_discarded()) {
-      params_json = nlohmann::json::object();
-    }
-    tools.push_back({{"type", "function"},
-                     {"function",
-                      {{"name", schema.name},
-                       {"description", schema.description},
-                       {"parameters", std::move(params_json)}}}});
+    tools.push_back(
+        {{"type", "function"},
+         {"function",
+          {{"name", schema.name},
+           {"description", schema.description},
+           {"parameters", schema.parameters.is_null()
+                              ? nlohmann::json::object()
+                              : schema.parameters}}}});
   }
   return tools;
 }

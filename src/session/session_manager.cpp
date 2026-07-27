@@ -144,6 +144,66 @@ SessionMessage SessionMessage::FromJsonl(const nlohmann::json& j) {
   return msg;
 }
 
+// Read the last `want_lines` newline-delimited records of a file without
+// reading the whole thing. Transcripts grow without bound and GetHistory is
+// called once per agent turn (often for only the last 50 messages), so the
+// previous read-and-parse-everything cost grew linearly with session age.
+// Returns lines in original order; reads the whole file if it is small.
+static std::vector<std::string> tail_lines(const std::filesystem::path& path,
+                                           std::size_t want_lines) {
+  std::ifstream f(path, std::ios::binary);
+  if (!f) {
+    return {};
+  }
+  f.seekg(0, std::ios::end);
+  const std::streamoff size = f.tellg();
+  if (size <= 0) {
+    return {};
+  }
+
+  constexpr std::streamoff kChunk = 64 * 1024;
+  std::string buf;
+  std::streamoff read_from = size;
+  std::size_t newlines = 0;
+
+  // Walk backwards a chunk at a time until we have enough line boundaries.
+  while (read_from > 0 && newlines <= want_lines) {
+    std::streamoff start = std::max<std::streamoff>(0, read_from - kChunk);
+    std::size_t len = static_cast<std::size_t>(read_from - start);
+    std::string chunk(len, '\0');
+    f.seekg(start);
+    f.read(chunk.data(), static_cast<std::streamsize>(len));
+    chunk.resize(static_cast<std::size_t>(f.gcount()));
+    newlines += static_cast<std::size_t>(
+        std::count(chunk.begin(), chunk.end(), '\n'));
+    buf.insert(0, chunk);
+    read_from = start;
+  }
+
+  std::vector<std::string> lines;
+  std::size_t pos = 0;
+  while (pos <= buf.size()) {
+    std::size_t nl = buf.find('\n', pos);
+    if (nl == std::string::npos) {
+      if (pos < buf.size()) {
+        lines.emplace_back(buf, pos, buf.size() - pos);
+      }
+      break;
+    }
+    lines.emplace_back(buf, pos, nl - pos);
+    pos = nl + 1;
+  }
+  // The first line may be a partial record if we stopped mid-file.
+  if (read_from > 0 && !lines.empty()) {
+    lines.erase(lines.begin());
+  }
+  if (lines.size() > want_lines) {
+    lines.erase(lines.begin(),
+                lines.begin() + (lines.size() - want_lines));
+  }
+  return lines;
+}
+
 // --- SessionManager ---
 
 SessionManager::SessionManager(const std::filesystem::path& sessions_dir,
@@ -152,6 +212,40 @@ SessionManager::SessionManager(const std::filesystem::path& sessions_dir,
   std::filesystem::create_directories(sessions_dir_);
   LoadStore();
   logger_->info("SessionManager initialized at: {}", sessions_dir_.string());
+}
+
+SessionManager::~SessionManager() {
+  // Anything the debounce was still holding must reach disk.
+  FlushStore();
+}
+
+std::shared_ptr<std::mutex>
+SessionManager::lock_for(const std::string& normalized_key) const {
+  auto it = session_locks_.find(normalized_key);
+  if (it != session_locks_.end()) {
+    return it->second;
+  }
+  return session_locks_.emplace(normalized_key, std::make_shared<std::mutex>())
+      .first->second;
+}
+
+void SessionManager::maybe_flush_store() const {
+  if (!store_dirty_.load(std::memory_order_acquire)) {
+    return;
+  }
+  auto now = std::chrono::steady_clock::now();
+  if (now - last_store_flush_ < kStoreFlushInterval) {
+    return;
+  }
+  std::unique_lock lock(mutex_);
+  save_store_locked();
+}
+
+void SessionManager::FlushStore() {
+  std::unique_lock lock(mutex_);
+  if (store_dirty_.load(std::memory_order_acquire)) {
+    save_store_locked();
+  }
 }
 
 SessionHandle SessionManager::GetOrCreate(const std::string& session_key,
@@ -214,28 +308,37 @@ void SessionManager::AppendMessage(const std::string& session_key,
 
 void SessionManager::AppendMessage(const std::string& session_key,
                                    const SessionMessage& msg) {
-  std::unique_lock<std::shared_mutex> lock(mutex_);
-
-  std::string normalized = NormalizeSessionKey(session_key);
-  auto it = store_.find(normalized);
-  if (it == store_.end()) {
-    logger_->error("Session not found: {}", session_key);
-    return;
+  std::filesystem::path path;
+  std::shared_ptr<std::mutex> slock;
+  {
+    std::unique_lock<std::shared_mutex> lock(mutex_);
+    std::string normalized = NormalizeSessionKey(session_key);
+    auto it = store_.find(normalized);
+    if (it == store_.end()) {
+      logger_->error("Session not found: {}", session_key);
+      return;
+    }
+    path = transcript_path(it->second.session_id);
+    it->second.updated_at = get_timestamp();
+    // Only a timestamp bump: mark dirty and let the debounce coalesce it
+    // rather than rewriting the whole index for every message.
+    store_dirty_.store(true, std::memory_order_release);
+    slock = lock_for(normalized);
   }
 
-  auto path = transcript_path(it->second.session_id);
-  std::ofstream file(path, std::ios::app);
-  if (!file.is_open()) {
-    logger_->error("Failed to open transcript: {}", path.string());
-    return;
+  {
+    // Per-session, so appends to other sessions are not serialised behind
+    // this file write.
+    std::lock_guard<std::mutex> transcript_lock(*slock);
+    std::ofstream file(path, std::ios::app);
+    if (!file.is_open()) {
+      logger_->error("Failed to open transcript: {}", path.string());
+      return;
+    }
+    file << msg.ToJsonl().dump() << "\n";
   }
 
-  file << msg.ToJsonl().dump() << "\n";
-  file.close();
-
-  // Update timestamp
-  it->second.updated_at = get_timestamp();
-  SaveStore();
+  maybe_flush_store();
 }
 
 bool SessionManager::AppendTranscriptEntry(const std::string& session_key,
@@ -283,42 +386,73 @@ void SessionManager::AppendCustomMessage(const std::string& session_key,
 std::vector<SessionMessage>
 SessionManager::GetHistory(const std::string& session_key,
                            int max_messages) const {
-  std::shared_lock<std::shared_mutex> lock(mutex_);
-  std::vector<SessionMessage> messages;
-
-  std::string normalized = NormalizeSessionKey(session_key);
-  auto it = store_.find(normalized);
-  if (it == store_.end()) {
-    return messages;
+  std::filesystem::path path;
+  std::shared_ptr<std::mutex> slock;
+  {
+    std::shared_lock<std::shared_mutex> lock(mutex_);
+    std::string normalized = NormalizeSessionKey(session_key);
+    auto it = store_.find(normalized);
+    if (it == store_.end()) {
+      return {};
+    }
+    path = transcript_path(it->second.session_id);
+    slock = lock_for(normalized);
   }
 
-  auto path = transcript_path(it->second.session_id);
   if (!std::filesystem::exists(path)) {
-    return messages;
+    return {};
   }
 
-  std::ifstream file(path);
-  std::string line;
-  while (std::getline(file, line)) {
-    if (line.empty())
-      continue;
-    try {
-      auto j = nlohmann::json::parse(line);
-      if (!j.contains("type") || !j["type"].is_string() ||
-          j["type"].get<std::string>() != "message")
+  // The global lock is released before this point: parsing a large transcript
+  // used to block every other session's appends and reads for its duration.
+  std::lock_guard<std::mutex> transcript_lock(*slock);
+
+  auto parse_lines = [&](const std::vector<std::string>& lines) {
+    std::vector<SessionMessage> out;
+    out.reserve(lines.size());
+    for (const auto& line : lines) {
+      if (line.empty()) {
         continue;
-      messages.push_back(SessionMessage::FromJsonl(j));
-    } catch (const std::exception& e) {
-      logger_->warn("Failed to parse JSONL line: {}", e.what());
+      }
+      auto j = nlohmann::json::parse(line, nullptr, /*allow_exceptions=*/false);
+      if (j.is_discarded()) {
+        logger_->warn("Skipping malformed JSONL line in {}", path.string());
+        continue;
+      }
+      if (!j.contains("type") || !j["type"].is_string() ||
+          j["type"].get<std::string>() != "message") {
+        continue;
+      }
+      out.push_back(SessionMessage::FromJsonl(j));
+    }
+    return out;
+  };
+
+  if (max_messages <= 0) {
+    std::vector<std::string> all;
+    std::ifstream file(path);
+    std::string line;
+    while (std::getline(file, line)) {
+      all.push_back(std::move(line));
+    }
+    return parse_lines(all);
+  }
+
+  // Read from the tail. A transcript also carries non-message records
+  // (thinking-level changes, custom messages), so lines != messages: widen the
+  // window and retry until we have enough messages or have read the file.
+  std::size_t want = static_cast<std::size_t>(max_messages);
+  for (std::size_t window = want * 2 + 16;; window *= 4) {
+    auto lines = tail_lines(path, window);
+    auto messages = parse_lines(lines);
+    const bool read_whole_file = lines.size() < window;
+    if (messages.size() >= want || read_whole_file) {
+      if (messages.size() > want) {
+        messages.erase(messages.begin(), messages.end() - want);
+      }
+      return messages;
     }
   }
-
-  if (max_messages > 0 && static_cast<int>(messages.size()) > max_messages) {
-    messages.erase(messages.begin(),
-                   messages.begin() + (messages.size() - max_messages));
-  }
-
-  return messages;
 }
 
 std::vector<SessionInfo> SessionManager::ListSessions() const {
@@ -405,6 +539,11 @@ void SessionManager::ResetSession(const std::string& session_key) {
 }
 
 void SessionManager::SaveStore() {
+  save_store_locked();
+}
+
+// Caller must hold mutex_ (or be in the constructor/destructor).
+void SessionManager::save_store_locked() const {
   auto store_path = sessions_dir_ / "sessions.json";
   nlohmann::json j = nlohmann::json::object();
   for (const auto& [key, info] : store_) {
@@ -422,14 +561,16 @@ void SessionManager::SaveStore() {
       entry["subagentRole"] = info.subagent_role;
     j[key] = entry;
   }
-  // Atomic replace: this file is the index of every session the user has, and
-  // it is rewritten on every appended message. A truncating write leaves a
-  // window on each one where a crash loses the lot.
+  // Atomic replace: this file is the index of every session the user has, so a
+  // truncating write leaves a window where a crash loses the lot.
   std::string err;
   if (!WriteFileAtomically(store_path, j.dump(2), &err)) {
     logger_->error("Failed to persist session store {}: {}", store_path.string(),
                    err);
+    return;
   }
+  store_dirty_.store(false, std::memory_order_release);
+  last_store_flush_ = std::chrono::steady_clock::now();
 }
 
 void SessionManager::LoadStore() {

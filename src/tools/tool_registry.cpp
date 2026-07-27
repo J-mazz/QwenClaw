@@ -47,14 +47,18 @@ static std::string url_encode(const std::string& s) {
 
 // Strip HTML tags and decode basic entities → plain text
 static std::string html_to_text(const std::string& html) {
+  // Compiled once. std::regex construction is expensive and these were being
+  // rebuilt on every web_fetch — five compilations per fetched page.
+  static const std::regex kScriptStyle(
+      "<(script|style)[^>]*>[\\s\\S]*?</(script|style)>", std::regex::icase);
+  static const std::regex kTags("<[^>]+>");
+  static const std::regex kSpaces("[ \t]+");
+  static const std::regex kBlankRuns("\n{3,}");
+
   // Remove <script> and <style> blocks
-  std::string text = std::regex_replace(
-      html,
-      std::regex("<(script|style)[^>]*>[\\s\\S]*?</(script|style)>",
-                 std::regex::icase),
-      " ");
+  std::string text = std::regex_replace(html, kScriptStyle, " ");
   // Remove all remaining tags
-  text = std::regex_replace(text, std::regex("<[^>]+>"), " ");
+  text = std::regex_replace(text, kTags, " ");
   // Decode basic entities
   auto replace_all = [](std::string s, const std::string& from,
                         const std::string& to) {
@@ -72,8 +76,8 @@ static std::string html_to_text(const std::string& html) {
   text = replace_all(text, "&#39;", "'");
   text = replace_all(text, "&nbsp;", " ");
   // Collapse whitespace
-  text = std::regex_replace(text, std::regex("[ \t]+"), " ");
-  text = std::regex_replace(text, std::regex("\n{3,}"), "\n\n");
+  text = std::regex_replace(text, kSpaces, " ");
+  text = std::regex_replace(text, kBlankRuns, "\n\n");
   return text;
 }
 
@@ -124,7 +128,8 @@ void ToolRegistry::register_tool(
       std::remove_if(tool_schemas_.begin(), tool_schemas_.end(),
                      [&name](const ToolSchema& s) { return s.name == name; }),
       tool_schemas_.end());
-  tool_schemas_.push_back({name, description, params_schema.dump()});
+  tool_schemas_.push_back(
+      {name, description, params_schema.dump(), std::move(params_schema)});
 }
 
 // ---------------------------------------------------------------------------

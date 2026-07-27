@@ -56,10 +56,16 @@ class MemorySearch {
     std::vector<std::string> tokens;
   };
 
+  // One occurrence list entry: which document, and how often the term appears
+  // in it. Term frequency is computed once at index time rather than
+  // recomputed for every document on every query.
+  struct Posting {
+    std::uint32_t entry_index;
+    std::uint32_t term_frequency;
+  };
+
   static std::vector<std::string> tokenize(const std::string& text);
-  double score_entry(const IndexEntry& entry,
-                     const std::vector<std::string>& query_tokens) const;
-  void rebuild_df_index();
+  void rebuild_index();
 
   // Body of IndexFile without the lock, so IndexDirectory can index many files
   // under a single unique_lock. mu_ is not recursive.
@@ -78,9 +84,12 @@ class MemorySearch {
   double avg_doc_length_ = 0;
   static constexpr double kBM25_k1 = 1.2;
   static constexpr double kBM25_b = 0.75;
-  // Precomputed inverted index: term → number of documents containing it.
-  // Rebuilt after indexing to make BM25 scoring O(Q) instead of O(Q*N*T).
-  std::unordered_map<std::string, int> df_index_;
+
+  // Inverted index: term → the documents containing it, with per-document term
+  // frequency. Search visits only the documents that actually contain a query
+  // term, instead of scoring all N and rebuilding each one's term-frequency
+  // map from scratch. Document frequency is just postings_[term].size().
+  std::unordered_map<std::string, std::vector<Posting>> postings_;
   std::shared_ptr<EmbeddingProvider> embedding_provider_;
   VectorIndex vector_index_;
   TemporalDecay temporal_decay_;

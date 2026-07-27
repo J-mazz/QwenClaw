@@ -332,3 +332,93 @@ TEST_F(HybridSearchTest, ClearResetsAll) {
 }
 
 }  // namespace quantclaw
+
+// ── Index/search scaling ─────────────────────────────────────────────────────
+//
+// IndexDirectory used to recompute avg_doc_length_ over every entry and rebuild
+// the whole document-frequency index once *per file*, making a directory scan
+// O(files * entries). Search then scored every document in the index and
+// rebuilt each one's term-frequency map from all of its tokens, so a query cost
+// O(N * doc_len) even for a term appearing in one document.
+//
+// These assert the resulting behaviour with budgets loose enough not to be
+// flaky on a loaded machine, but far below what the quadratic versions needed.
+
+namespace {
+
+std::filesystem::path MakeCorpus(const std::string& name, int files,
+                                 int paras_per_file) {
+  auto dir = std::filesystem::temp_directory_path() / name;
+  std::error_code ec;
+  std::filesystem::remove_all(dir, ec);
+  std::filesystem::create_directories(dir);
+
+  std::mt19937 rng(42);
+  std::vector<std::string> vocab;
+  vocab.reserve(2000);
+  for (int i = 0; i < 2000; ++i) {
+    vocab.push_back("term" + std::to_string(i));
+  }
+  for (int f = 0; f < files; ++f) {
+    std::ofstream o(dir / ("f" + std::to_string(f) + ".md"));
+    for (int p = 0; p < paras_per_file; ++p) {
+      for (int w = 0; w < 60; ++w) {
+        o << vocab[rng() % vocab.size()] << ' ';
+      }
+      o << "\n\n";
+    }
+  }
+  return dir;
+}
+
+}  // namespace
+
+TEST(MemorySearchScaling, IndexingADirectoryIsNotQuadraticInFileCount) {
+  auto dir = MakeCorpus("qc_scale_index", 300, 10);
+  auto logger = std::make_shared<spdlog::logger>(
+      "scale", std::make_shared<spdlog::sinks::null_sink_mt>());
+
+  quantclaw::MemorySearch search(logger);
+  auto start = std::chrono::steady_clock::now();
+  search.IndexDirectory(dir);
+  auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+      std::chrono::steady_clock::now() - start);
+
+  EXPECT_EQ(search.Stats()["indexed_entries"], 3000u);
+  EXPECT_LT(elapsed.count(), 10000)
+      << "3000 entries took " << elapsed.count()
+      << "ms; a per-file index rebuild would be far slower";
+
+  std::error_code ec;
+  std::filesystem::remove_all(dir, ec);
+}
+
+TEST(MemorySearchScaling, SearchVisitsOnlyMatchingDocuments) {
+  auto dir = MakeCorpus("qc_scale_search", 200, 10);
+  auto logger = std::make_shared<spdlog::logger>(
+      "scale", std::make_shared<spdlog::sinks::null_sink_mt>());
+
+  quantclaw::MemorySearch search(logger);
+  search.IndexDirectory(dir);
+
+  // A term that appears nowhere must not cost a full scan of the index.
+  auto start = std::chrono::steady_clock::now();
+  for (int i = 0; i < 2000; ++i) {
+    auto r = search.Search("zzzz_absent_term", 10);
+    EXPECT_TRUE(r.empty());
+  }
+  auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+      std::chrono::steady_clock::now() - start);
+  EXPECT_LT(elapsed.count(), 5000)
+      << "2000 misses over 2000 entries took " << elapsed.count() << "ms";
+
+  // Real queries still return sensible, ranked results.
+  auto hits = search.Search("term5 term100", 10);
+  EXPECT_FALSE(hits.empty());
+  for (size_t i = 1; i < hits.size(); ++i) {
+    EXPECT_GE(hits[i - 1].score, hits[i].score) << "results must be ranked";
+  }
+
+  std::error_code ec;
+  std::filesystem::remove_all(dir, ec);
+}

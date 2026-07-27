@@ -109,11 +109,38 @@ class SessionManager : public Noncopyable {
   void SaveStore();
   void LoadStore();
 
+  // Flush the session index if it has pending changes. Called automatically;
+  // exposed so shutdown paths can force a write.
+  void FlushStore();
+
+  ~SessionManager();
+
  private:
   std::filesystem::path sessions_dir_;
   std::shared_ptr<spdlog::logger> logger_;
+
+  // Guards store_ and the per-session lock table only — never held across
+  // transcript file I/O, which would serialise every session behind one
+  // mutex while a multi-megabyte transcript was read.
   mutable std::shared_mutex mutex_;
   std::unordered_map<std::string, SessionInfo> store_;
+
+  // One lock per session so appends and reads on different sessions proceed in
+  // parallel while writes to the same transcript stay ordered. shared_ptr so a
+  // holder keeps it alive even if the session is deleted meanwhile.
+  mutable std::unordered_map<std::string, std::shared_ptr<std::mutex>>
+      session_locks_;
+  std::shared_ptr<std::mutex> lock_for(const std::string& normalized_key) const;
+
+  // The index used to be re-serialised and rewritten on *every* appended
+  // message: dozens of whole-file writes per agent turn, growing with the
+  // number of sessions. Message appends now only mark it dirty; structural
+  // changes (create/delete/rename) still flush immediately.
+  mutable std::atomic<bool> store_dirty_{false};
+  mutable std::chrono::steady_clock::time_point last_store_flush_{};
+  static constexpr std::chrono::seconds kStoreFlushInterval{5};
+  void maybe_flush_store() const;
+  void save_store_locked() const;
 
   std::string generate_session_id() const;
   std::string get_timestamp() const;
