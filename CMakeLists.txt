@@ -258,6 +258,10 @@ set(QUANTCLAW_CORE_SOURCES
     src/session/session_maintenance.cpp
     # Tools
     src/tools/tool_registry.cpp
+    src/tools/tool_registry_file_tools.cpp
+    src/tools/tool_registry_exec_tools.cpp
+    src/tools/tool_registry_web_tools.cpp
+    src/tools/tool_registry_recon_tools.cpp
     src/tools/tool_chain.cpp
     src/tools/browser_tool.cpp
     # MCP
@@ -352,6 +356,7 @@ set(QUANTCLAW_CORE_MODULE_SOURCES
     src/common/string_util.cppm
     src/builtin_skills.cppm
     src/thirdparty/json.ixx
+    src/tools/tool_helpers.cppm
     src/tools/tool_registry.cppm
     src/session/session_maintenance.cppm
     src/tools/tool_chain.cppm
