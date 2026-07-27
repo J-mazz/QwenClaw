@@ -12,7 +12,9 @@ module quantclaw.tools.tool_registry;
 import std;
 import nlohmann.json;
 
+import quantclaw.common.atomic_file;
 import quantclaw.common.defer;
+import quantclaw.constants;
 import quantclaw.core.subagent;
 import quantclaw.core.cron_scheduler;
 import quantclaw.core.memory_search;
@@ -121,15 +123,24 @@ ToolRegistry::ToolRegistry(std::shared_ptr<spdlog::logger> logger)
 void ToolRegistry::register_tool(
     const std::string& name, const std::string& description,
     nlohmann::json params_schema,
-    std::function<std::string(const nlohmann::json&)> handler) {
+    std::function<std::string(const nlohmann::json&)> handler, bool mutating) {
   std::unique_lock lock(registry_mu_);
   tools_[name] = std::move(handler);
   tool_schemas_.erase(
       std::remove_if(tool_schemas_.begin(), tool_schemas_.end(),
                      [&name](const ToolSchema& s) { return s.name == name; }),
       tool_schemas_.end());
-  tool_schemas_.push_back(
-      {name, description, params_schema.dump(), std::move(params_schema)});
+  tool_schemas_.push_back({name, description, params_schema.dump(),
+                           std::move(params_schema), mutating});
+}
+
+bool ToolRegistry::tool_is_mutating_locked(const std::string& name) const {
+  for (const auto& s : tool_schemas_) {
+    if (s.name == name) {
+      return s.mutating;
+    }
+  }
+  return false;
 }
 
 // ---------------------------------------------------------------------------
@@ -149,28 +160,32 @@ void ToolRegistry::RegisterBuiltinTools() {
       "write", "Write content to a file",
       nlohmann::json::parse(
           R"({"type":"object","properties":{"path":{"type":"string","description":"Path to write"},"content":{"type":"string","description":"Content to write"}},"required":["path","content"]})"),
-      [this](const nlohmann::json& p) { return write_file_tool(p); });
+      [this](const nlohmann::json& p) { return write_file_tool(p); },
+      /*mutating=*/true);
 
   // ---- edit ----
   register_tool(
       "edit", "Edit a file by replacing exact text",
       nlohmann::json::parse(
           R"({"type":"object","properties":{"path":{"type":"string"},"oldText":{"type":"string","description":"Exact text to replace"},"newText":{"type":"string","description":"Replacement text"}},"required":["path","oldText","newText"]})"),
-      [this](const nlohmann::json& p) { return edit_file_tool(p); });
+      [this](const nlohmann::json& p) { return edit_file_tool(p); },
+      /*mutating=*/true);
 
   // ---- exec ----
   register_tool(
       "exec", "Execute a shell command and return its output",
       nlohmann::json::parse(
           R"JSON({"type":"object","properties":{"command":{"type":"string","description":"Shell command to execute"},"workdir":{"type":"string","description":"Working directory (optional)"},"timeout":{"type":"integer","description":"Timeout in seconds (default 30)"}},"required":["command"]})JSON"),
-      [this](const nlohmann::json& p) { return exec_tool(p); });
+      [this](const nlohmann::json& p) { return exec_tool(p); },
+      /*mutating=*/true);
 
   // ---- bash (OpenClaw alias for exec) ----
   register_tool(
       "bash", "Execute a shell command (alias for exec)",
       nlohmann::json::parse(
           R"JSON({"type":"object","properties":{"command":{"type":"string","description":"Shell command to execute"},"timeout":{"type":"integer","description":"Timeout in seconds (default 30)"}},"required":["command"]})JSON"),
-      [this](const nlohmann::json& p) { return exec_tool(p); });
+      [this](const nlohmann::json& p) { return exec_tool(p); },
+      /*mutating=*/true);
 
   // ---- apply_patch ----
   register_tool(
@@ -180,7 +195,8 @@ void ToolRegistry::RegisterBuiltinTools() {
       "Delete File.",
       nlohmann::json::parse(
           R"({"type":"object","properties":{"patch":{"type":"string","description":"Patch text in *** Begin Patch ... *** End Patch format"}},"required":["patch"]})"),
-      [this](const nlohmann::json& p) { return apply_patch_tool(p); });
+      [this](const nlohmann::json& p) { return apply_patch_tool(p); },
+      /*mutating=*/true);
 
   // ---- process ----
   register_tool(
@@ -1015,6 +1031,7 @@ std::string ToolRegistry::ExecuteTool(const std::string& tool_name,
   // an MCP reconnect re-registered the tool mid-call.
   std::function<std::string(const nlohmann::json&)> handler;
   bool is_external = false;
+  bool declared_mutating = false;
   {
     std::shared_lock lock(registry_mu_);
     auto it = tools_.find(tool_name);
@@ -1022,6 +1039,7 @@ std::string ToolRegistry::ExecuteTool(const std::string& tool_name,
       throw std::runtime_error("Tool not found: " + tool_name);
     handler = it->second;
     is_external = external_tools_.count(tool_name) > 0;
+    declared_mutating = tool_is_mutating_locked(tool_name);
   }
 
   if (!permission_allows(tool_name, is_external))
@@ -1037,8 +1055,11 @@ std::string ToolRegistry::ExecuteTool(const std::string& tool_name,
     }
   }
 
+  // exec/bash run their own approval prompt inside exec_tool with the actual
+  // command line, which is more informative than a generic tool summary.
   if (approval_manager_ && tool_name != "exec" && tool_name != "bash" &&
-      is_mutating_impl(tool_name, parameters, is_external)) {
+      is_mutating_impl(tool_name, parameters, is_external,
+                       declared_mutating)) {
     auto decision =
         approval_manager_->RequestApproval(approval_summary(tool_name, parameters));
     if (decision == ApprovalDecision::kDenied) {
@@ -1130,26 +1151,31 @@ std::string ToolRegistry::approval_summary(const std::string& tool_name,
 bool ToolRegistry::IsMutatingToolCall(const std::string& tool_name,
                                       const nlohmann::json& parameters) const {
   bool is_external;
+  bool declared;
   {
     std::shared_lock lock(registry_mu_);
     is_external = external_tools_.count(tool_name) > 0;
+    declared = tool_is_mutating_locked(tool_name);
   }
-  return is_mutating_impl(tool_name, parameters, is_external);
+  return is_mutating_impl(tool_name, parameters, is_external, declared);
 }
 
 bool ToolRegistry::is_mutating_impl(const std::string& tool_name,
                                     const nlohmann::json& parameters,
-                                    bool is_external) {
-  if (tool_name == "write" || tool_name == "edit" ||
-      tool_name == "apply_patch" || tool_name == "exec" ||
-      tool_name == "bash") {
+                                    bool is_external, bool declared_mutating) {
+  // Declared at registration — the authoritative answer for built-in tools.
+  if (declared_mutating) {
     return true;
   }
 
+  // `process` is genuinely conditional: whether it mutates depends on the
+  // requested action, so it cannot be settled at registration time.
   if (tool_name == "process") {
     return looks_like_mutating_action(parameters);
   }
 
+  // External (MCP) tools carry no such declaration, so the name/parameter
+  // heuristics remain the only signal available for them.
   if (is_external) {
     if (looks_like_network_write(parameters) ||
         looks_like_mutating_action(parameters)) {
@@ -1197,6 +1223,19 @@ std::string ToolRegistry::read_file_tool(const nlohmann::json& params) {
     throw std::runtime_error("Access denied: path outside workspace: " + path);
   if (!std::filesystem::exists(path))
     throw std::runtime_error("File not found: " + path);
+
+  // Refuse rather than slurp: the whole file used to be read into memory with
+  // no ceiling, so pointing the tool at a multi-gigabyte artifact took the
+  // gateway down. The limit is well above any file worth sending to a model.
+  std::error_code ec;
+  auto size = std::filesystem::file_size(path, ec);
+  if (!ec && size > kMaxReadFileBytes) {
+    throw std::runtime_error(
+        "File too large to read: " + path + " (" + std::to_string(size) +
+        " bytes, limit " + std::to_string(kMaxReadFileBytes) +
+        "). Use exec with head/sed to read a portion.");
+  }
+
   std::ifstream f(path);
   if (!f)
     throw std::runtime_error("Failed to open: " + path);
@@ -1210,12 +1249,11 @@ std::string ToolRegistry::write_file_tool(const nlohmann::json& params) {
   std::string content = params["content"].get<std::string>();
   if (!quantclaw::SecuritySandbox::ValidateFilePath(path, workspace_path_))
     throw std::runtime_error("Access denied: path outside workspace: " + path);
-  std::filesystem::create_directories(
-      std::filesystem::path(path).parent_path());
-  std::ofstream f(path);
-  if (!f)
-    throw std::runtime_error("Failed to write: " + path);
-  f << content;
+  // Atomic: an interrupted write previously left the file truncated or
+  // half-written, destroying whatever was there before.
+  std::string err;
+  if (!WriteFileAtomically(path, content, &err))
+    throw std::runtime_error("Failed to write: " + path + ": " + err);
   return "Successfully wrote to file: " + path;
 }
 
@@ -1224,23 +1262,39 @@ std::string ToolRegistry::edit_file_tool(const nlohmann::json& params) {
       !params.contains("newText"))
     throw std::runtime_error(
         "Missing required parameters: path, oldText, newText");
-  std::string path = params["path"].get<std::string>();
+  // resolve_workspace_path, like read and write. Commit e4f6572 rooted those
+  // two at the workspace but missed edit, so a relative path here resolved
+  // against the gateway's own working directory instead — the same argument
+  // meant different files depending on which tool the model picked.
+  std::string path = resolve_workspace_path(params["path"].get<std::string>());
   std::string old_text = params["oldText"].get<std::string>();
   std::string new_text = params["newText"].get<std::string>();
+  if (old_text.empty())
+    throw std::runtime_error("oldText must not be empty");
   if (!quantclaw::SecuritySandbox::ValidateFilePath(path, workspace_path_))
     throw std::runtime_error("Access denied: path outside workspace: " + path);
   std::ifstream f(path);
   if (!f)
     throw std::runtime_error("Failed to open: " + path);
   std::string content(std::istreambuf_iterator<char>(f), {});
+
   size_t pos = content.find(old_text);
   if (pos == std::string::npos)
     throw std::runtime_error("Text not found in file: " + old_text);
+  // Require a unique match. Replacing the first of several occurrences edits
+  // an arbitrary one and reports success, which is worse than refusing: the
+  // model cannot tell it changed the wrong line.
+  if (content.find(old_text, pos + 1) != std::string::npos)
+    throw std::runtime_error(
+        "oldText is ambiguous: it appears more than once in " + path +
+        ". Include surrounding context to make it unique.");
+
   content.replace(pos, old_text.size(), new_text);
-  std::ofstream out(path);
-  if (!out)
-    throw std::runtime_error("Failed to write edited file: " + path);
-  out << content;
+
+  std::string err;
+  if (!WriteFileAtomically(path, content, &err))
+    throw std::runtime_error("Failed to write edited file: " + path + ": " +
+                             err);
   return "Successfully edited file: " + path;
 }
 

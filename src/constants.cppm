@@ -3,6 +3,8 @@
 
 export module quantclaw.constants;
 
+import std;
+
 export namespace quantclaw {
 
 // ------------------------------------------------------------
@@ -75,6 +77,10 @@ inline constexpr int kContextWindow200K = 200000;
 
 /// Default context window when model is unknown
 inline constexpr int kDefaultContextWindow = 128000;
+
+/// Ceiling on the `read` tool. Files above this are refused rather than read
+/// into gateway memory whole.
+inline constexpr std::size_t kMaxReadFileBytes = 32ULL * 1024 * 1024;
 
 /// Tool result truncation: max chars for a single tool result
 inline constexpr int kToolResultMaxChars = 30000;

@@ -36,9 +36,9 @@ QwenClaw is a fork of the OpenClaw/QuantClaw lineage — a WebSocket RPC gateway
 - **Agent loop** — multi-turn reasoning with dynamic iteration limits (32–160), tool calls, fallback chains, and stream-based event emission
 - **Provider layer** — Anthropic `/v1/messages` and OpenAI-compatible `/v1/chat/completions` (llama-server) with multi-key rotation, cooldown tracking, and automatic failover
 - **Tool system** — filesystem ops, subprocess exec, web search, browser control, DuckDB queries, cron scheduling, memory search, subagent delegation
-- **Session persistence** — DuckDB-backed history with multi-stage compaction (soft prune → hard prune → overflow re-compact)
+- **Session persistence** — append-only JSONL transcripts with multi-stage compaction (soft prune → hard prune → overflow re-compact); DuckDB backs the DAG, recon, and evolve runtimes
 - **Semantic memory** — hybrid keyword + vector embedding search with MMR reranking and temporal decay
-- **Security** — RBAC, per-tool allow/deny, Linux seccomp sandboxing, manual exec approval workflows, rate limiting
+- **Access control** — RBAC, per-tool allow/deny, workspace-scoped path validation, manual exec approval workflows, rate limiting, per-child resource limits (see [Security model](#security-model))
 - **MCP integration** — server mode (expose tools) and client mode (consume external MCP servers)
 - **Plugin sidecar** — Node.js/TypeScript runtime over TCP loopback for OpenClaw-compatible plugins with hot-reload
 - **Channel adapters** — Discord and Telegram frameworks (extensible)
@@ -163,6 +163,42 @@ JSON-RPC 2.0 over WebSocket. Frames carry `type` (`req` | `res` | `event`), a UU
 - `agent.thinking_delta` — extended thinking output
 - `agent.tool_use` / `agent.tool_result` — tool invocation lifecycle
 - `agent.message_end` — reasoning complete
+
+## Security model
+
+QuantClaw runs an LLM that executes shell commands and edits files on your
+machine. Be precise about what that does and does not contain.
+
+**Enforced:**
+
+- **Workspace path scoping** — file tools resolve relative paths against the
+  agent workspace and reject anything outside it, compared component-wise
+  (so `/tmp` does not match `/tmp2`) after symlinks and `..` are resolved.
+- **Per-tool allow/deny and RBAC** — tools can be denied per connection role
+  and scope; MCP tools are gated per server.
+- **Exec approval** — when an approval manager is configured, mutating tools
+  and shell commands require an explicit decision before running.
+- **Child resource limits** — subprocesses get their own address-space, CPU,
+  and file-size ceilings, plus a cap on captured output. These bound the blast
+  radius of a runaway command; they do not confine a deliberate one.
+- **Rate limiting** — per-connection request limits on the gateway.
+- **Loopback binding** — the gateway and control API bind `127.0.0.1`.
+
+**Not enforced — do not rely on these:**
+
+- **There is no syscall sandbox.** No seccomp, no Landlock, no namespaces. A
+  command that the agent is permitted to run has the full authority of the
+  user account running the gateway.
+- **`ValidateShellCommand` is not a security boundary.** It rejects a handful
+  of obviously destructive literals (`rm -rf /`, `mkfs`, `dd if=`) and is
+  trivially bypassed (`rm -fr /`, or any indirection). It exists to catch
+  accidents, not attacks.
+- **Path validation is TOCTOU-racy** by nature: it checks, then opens.
+
+The practical consequence: **treat the agent as having the privileges of the
+account it runs under.** If that is not acceptable for your threat model, run
+the gateway inside a container, VM, or dedicated unprivileged user — that
+isolation has to come from outside this process.
 
 ## Tests
 

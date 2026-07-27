@@ -31,6 +31,13 @@ class ToolRegistry {
 		// iteration of every turn and used to re-parse each schema string each
 		// time; parsing once at registration removes that from the hot path.
 		nlohmann::json parameters;
+		// Whether this tool can change state, declared where the tool is
+		// registered. Mutation used to be inferred from hardcoded name lists and
+		// substring matching ("write", "delete", ...) in IsMutatingToolCall, so a
+		// new mutating tool was silently exempt from approval until someone
+		// remembered to extend the list, and a read-only tool with an unlucky name
+		// was gated for no reason.
+		bool mutating = false;
 	};
 
 	// Background process session (for 'process' tool)
@@ -160,12 +167,18 @@ class ToolRegistry {
 	bool permission_allows(const std::string& tool_name, bool is_external) const;
 	static bool is_mutating_impl(const std::string& tool_name,
 															 const nlohmann::json& params,
-															 bool is_external);
+															 bool is_external, bool declared_mutating);
 
-	// Helper to (re-)register a tool without duplicating its schema
+	// Helper to (re-)register a tool without duplicating its schema.
+	// `mutating` gates human approval; default false means read-only.
 	void register_tool(const std::string& name, const std::string& description,
 										 nlohmann::json params_schema,
-										 std::function<std::string(const nlohmann::json&)> handler);
+										 std::function<std::string(const nlohmann::json&)> handler,
+										 bool mutating = false);
+
+	// Look up the declared mutating flag for a registered tool.
+	// Caller must hold registry_mu_.
+	bool tool_is_mutating_locked(const std::string& name) const;
 
 	// Built-in tool implementations
 	std::string resolve_workspace_path(const std::string& path) const;

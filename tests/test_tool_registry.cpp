@@ -268,3 +268,112 @@ TEST_F(ToolRegistryTest, MutationClassifierRecognizesExternalMutationHints) {
   EXPECT_TRUE(tool_registry_->IsMutatingToolCall(
       "mcp_remote_call", nlohmann::json{{"action", "delete"}}));
 }
+
+// --- file tools: workspace rooting, uniqueness, size ceiling ---
+
+// Commit e4f6572 rooted read and write at the workspace but missed edit, so a
+// relative path meant a different file depending on which tool was used.
+TEST_F(ToolRegistryTest, EditResolvesRelativePathsAgainstWorkspace) {
+  tool_registry_->ExecuteTool(
+      "write", {{"path", "notes.md"}, {"content", "alpha\nbravo\n"}});
+  ASSERT_TRUE(std::filesystem::exists(test_dir_ / "notes.md"));
+
+  tool_registry_->ExecuteTool(
+      "edit",
+      {{"path", "notes.md"}, {"oldText", "bravo"}, {"newText", "charlie"}});
+
+  std::ifstream f(test_dir_ / "notes.md");
+  std::string content((std::istreambuf_iterator<char>(f)), {});
+  EXPECT_EQ(content, "alpha\ncharlie\n")
+      << "edit must target the same file read/write would";
+}
+
+// Replacing the first of several identical matches silently edits an arbitrary
+// one and reports success; the model cannot tell it hit the wrong line.
+TEST_F(ToolRegistryTest, EditRefusesAmbiguousMatch) {
+  tool_registry_->ExecuteTool(
+      "write", {{"path", "dup.txt"}, {"content", "x = 1\ny = 2\nx = 1\n"}});
+
+  EXPECT_THROW(tool_registry_->ExecuteTool("edit", {{"path", "dup.txt"},
+                                                    {"oldText", "x = 1"},
+                                                    {"newText", "x = 9"}}),
+               std::runtime_error);
+
+  // The file must be untouched by the refused edit.
+  std::ifstream f(test_dir_ / "dup.txt");
+  std::string content((std::istreambuf_iterator<char>(f)), {});
+  EXPECT_EQ(content, "x = 1\ny = 2\nx = 1\n");
+}
+
+TEST_F(ToolRegistryTest, EditAcceptsUniqueMatchWithContext) {
+  tool_registry_->ExecuteTool(
+      "write", {{"path", "dup.txt"}, {"content", "x = 1\ny = 2\nx = 1\n"}});
+
+  EXPECT_NO_THROW(tool_registry_->ExecuteTool("edit",
+                                              {{"path", "dup.txt"},
+                                               {"oldText", "y = 2\nx = 1"},
+                                               {"newText", "y = 2\nx = 9"}}));
+  std::ifstream f(test_dir_ / "dup.txt");
+  std::string content((std::istreambuf_iterator<char>(f)), {});
+  EXPECT_EQ(content, "x = 1\ny = 2\nx = 9\n");
+}
+
+TEST_F(ToolRegistryTest, EditRejectsEmptyOldText) {
+  tool_registry_->ExecuteTool("write",
+                              {{"path", "e.txt"}, {"content", "data"}});
+  EXPECT_THROW(tool_registry_->ExecuteTool("edit", {{"path", "e.txt"},
+                                                    {"oldText", ""},
+                                                    {"newText", "x"}}),
+               std::runtime_error);
+}
+
+// Reading a huge file used to load it into gateway memory whole.
+TEST_F(ToolRegistryTest, ReadRefusesOversizedFile) {
+  auto big = test_dir_ / "big.bin";
+  {
+    std::ofstream f(big, std::ios::binary);
+    f.seekp(64LL * 1024 * 1024);
+    f.put('\0');
+  }
+  EXPECT_THROW(tool_registry_->ExecuteTool("read", {{"path", "big.bin"}}),
+               std::runtime_error);
+
+  // Ordinary files still read fine.
+  tool_registry_->ExecuteTool("write",
+                              {{"path", "small.txt"}, {"content", "hello"}});
+  EXPECT_EQ(tool_registry_->ExecuteTool("read", {{"path", "small.txt"}}),
+            "hello");
+}
+
+// --- declarative mutation classification ---
+
+TEST_F(ToolRegistryTest, MutationIsDeclaredNotInferredFromNames) {
+  EXPECT_TRUE(tool_registry_->IsMutatingToolCall("write", {}));
+  EXPECT_TRUE(tool_registry_->IsMutatingToolCall("edit", {}));
+  EXPECT_TRUE(tool_registry_->IsMutatingToolCall("exec", {}));
+  EXPECT_TRUE(tool_registry_->IsMutatingToolCall("bash", {}));
+  EXPECT_TRUE(tool_registry_->IsMutatingToolCall("apply_patch", {}));
+
+  // Read-only builtins, including ones whose names contain mutating-sounding
+  // substrings that the old heuristic would have matched.
+  EXPECT_FALSE(tool_registry_->IsMutatingToolCall("read", {}));
+  EXPECT_FALSE(tool_registry_->IsMutatingToolCall("web_search", {}));
+  EXPECT_FALSE(tool_registry_->IsMutatingToolCall("memory_search", {}));
+}
+
+// A newly registered mutating tool is gated because it says so, without any
+// name list needing to be extended.
+TEST_F(ToolRegistryTest, ExternalToolMutationStillUsesHeuristics) {
+  tool_registry_->RegisterExternalTool(
+      "svc_create_thing", "creates things", nlohmann::json{{"type", "object"}},
+      [](const nlohmann::json&) -> std::string { return "ok"; });
+  EXPECT_TRUE(tool_registry_->IsMutatingToolCall("svc_create_thing", {}));
+
+  tool_registry_->RegisterExternalTool(
+      "svc_lookup", "reads things", nlohmann::json{{"type", "object"}},
+      [](const nlohmann::json&) -> std::string { return "ok"; });
+  EXPECT_FALSE(tool_registry_->IsMutatingToolCall("svc_lookup", {}));
+  // ...but an explicit mutating HTTP method still counts.
+  EXPECT_TRUE(
+      tool_registry_->IsMutatingToolCall("svc_lookup", {{"method", "POST"}}));
+}

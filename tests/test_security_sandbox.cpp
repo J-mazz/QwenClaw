@@ -192,3 +192,54 @@ TEST_F(SandboxTest, HostProcessLimitsUnchangedByExecCapture) {
   EXPECT_EQ(before.rlim_max, after.rlim_max);
 }
 #endif
+
+// --- path containment: the two validators must agree ---
+//
+// Sandbox::ValidateFilePath compared path components, but IsPathAllowed used
+// raw string prefix matching, so the same path could be allowed by one and
+// denied by the other. Both now share one containment rule.
+
+TEST_F(SandboxTest, PrefixSiblingDirectoryIsNotInsideWorkspace) {
+  // The classic string-prefix bug: "/tmp2/x" starts with "/tmp" as text but is
+  // not inside it.
+  EXPECT_FALSE(
+      quantclaw::Sandbox::ValidateFilePath("/tmp2/evil.txt", "/tmp"));
+  EXPECT_TRUE(quantclaw::Sandbox::ValidateFilePath("/tmp/ok.txt", "/tmp"));
+
+  quantclaw::Sandbox sandbox(test_dir_, {"/tmp"}, {}, {}, {});
+  EXPECT_FALSE(sandbox.IsPathAllowed("/tmp2/evil.txt"));
+  EXPECT_TRUE(sandbox.IsPathAllowed("/tmp/ok.txt"));
+}
+
+TEST_F(SandboxTest, DeniedPathDoesNotBlockPrefixSibling) {
+  quantclaw::Sandbox sandbox(test_dir_, {}, {"/etc"}, {}, {});
+  EXPECT_FALSE(sandbox.IsPathAllowed("/etc/passwd"));
+  // "/etcetera" merely shares a textual prefix with the denied "/etc".
+  EXPECT_TRUE(sandbox.IsPathAllowed("/etcetera/fine.txt"));
+}
+
+// weakly_canonical already resolves "..", so the old substring check on the
+// normalized path caught no traversal — it only rejected legitimate filenames.
+TEST_F(SandboxTest, FilenamesContainingDotsAreNotRejected) {
+  auto nested = test_dir_ / "v1..2";
+  std::filesystem::create_directories(nested);
+  EXPECT_TRUE(quantclaw::Sandbox::ValidateFilePath(
+      (test_dir_ / "report..md").string(), test_dir_.string()));
+  EXPECT_TRUE(quantclaw::Sandbox::ValidateFilePath((nested / "notes.txt").string(),
+                                                   test_dir_.string()));
+}
+
+TEST_F(SandboxTest, TraversalOutOfWorkspaceStillRejected) {
+  EXPECT_FALSE(quantclaw::Sandbox::ValidateFilePath(
+      (test_dir_ / ".." / ".." / "etc" / "passwd").string(),
+      test_dir_.string()));
+}
+
+// A malformed deny pattern used to throw out of the constructor.
+TEST_F(SandboxTest, InvalidDenyPatternDoesNotDisableTheRest) {
+  EXPECT_NO_THROW({
+    quantclaw::Sandbox sandbox(test_dir_, {}, {}, {}, {"[unclosed", "curl"});
+    EXPECT_FALSE(sandbox.IsCommandAllowed("curl http://example.com"));
+    EXPECT_TRUE(sandbox.IsCommandAllowed("ls -la"));
+  });
+}

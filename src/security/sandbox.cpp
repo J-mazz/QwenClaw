@@ -15,6 +15,43 @@ import std;
 
 namespace quantclaw {
 
+namespace {
+
+// Is `candidate` inside `base`, comparing whole path components?
+//
+// The single containment rule for the whole sandbox. String prefix matching
+// (`candidate.find(base) == 0`) is the classic wrong answer: it accepts
+// "/tmp2/evil" as being inside "/tmp", and rejects nothing that merely shares
+// a textual prefix. ValidateFilePath already iterated components; IsPathAllowed
+// still used the string form, so the two disagreed about the same path.
+bool path_within(const std::filesystem::path& base,
+                 const std::filesystem::path& candidate) {
+  auto b = base.begin();
+  auto c = candidate.begin();
+  for (; b != base.end(); ++b, ++c) {
+    if (c == candidate.end()) {
+      return false;  // candidate is shorter than base
+    }
+#ifdef _WIN32
+    auto to_lower = [](std::string s) {
+      std::transform(s.begin(), s.end(), s.begin(),
+                     [](unsigned char ch) { return std::tolower(ch); });
+      return s;
+    };
+    if (to_lower(b->string()) != to_lower(c->string())) {
+      return false;
+    }
+#else
+    if (*b != *c) {
+      return false;
+    }
+#endif
+  }
+  return true;
+}
+
+}  // namespace
+
 Sandbox::Sandbox(const std::filesystem::path& workspace_path,
                  const std::vector<std::string>& allowed_paths,
                  const std::vector<std::string>& denied_paths,
@@ -26,19 +63,26 @@ Sandbox::Sandbox(const std::filesystem::path& workspace_path,
       allowed_commands_(allowed_commands),
       denied_commands_(denied_commands) {
   for (const auto& cmd : denied_commands_) {
-    denied_cmd_patterns_.push_back(
-        std::regex(cmd, std::regex_constants::icase));
+    // Patterns come from user config. An invalid one used to throw out of the
+    // constructor, taking down whatever was constructing the sandbox; skip it
+    // and keep the rest of the deny list in force.
+    try {
+      denied_cmd_patterns_.emplace_back(cmd, std::regex_constants::icase);
+    } catch (const std::regex_error&) {
+      // Intentionally ignored: a malformed deny pattern must not disable the
+      // other patterns or abort startup.
+    }
   }
 }
 
 bool Sandbox::IsPathAllowed(const std::string& path) const {
-  std::filesystem::path resolved_path = std::filesystem::absolute(path);
+  std::filesystem::path resolved_path =
+      std::filesystem::absolute(path).lexically_normal();
 
   // Check against denied paths first
   for (const auto& denied_path : denied_paths_) {
-    std::filesystem::path denied_resolved =
-        std::filesystem::absolute(denied_path);
-    if (resolved_path.string().find(denied_resolved.string()) == 0) {
+    if (path_within(std::filesystem::absolute(denied_path).lexically_normal(),
+                    resolved_path)) {
       return false;
     }
   }
@@ -46,9 +90,8 @@ bool Sandbox::IsPathAllowed(const std::string& path) const {
   // If allowed paths are specified, check against them
   if (!allowed_paths_.empty()) {
     for (const auto& allowed_path : allowed_paths_) {
-      std::filesystem::path allowed_resolved =
-          std::filesystem::absolute(allowed_path);
-      if (resolved_path.string().find(allowed_resolved.string()) == 0) {
+      if (path_within(std::filesystem::absolute(allowed_path).lexically_normal(),
+                      resolved_path)) {
         return true;
       }
     }
@@ -96,35 +139,11 @@ bool Sandbox::ValidateFilePath(const std::string& path,
   if (ec)
     return false;
 
-  // Basic traversal check on the normalized string.
-  std::string path_str = path_abs.string();
-  if (path_str.find("..") != std::string::npos) {
-    return false;
-  }
-
-  // Ensure the resolved path is inside the workspace using component-level
-  // iteration so that "/tmp" does not match "/tmp2/...".
-  auto ws_it = ws_abs.begin();
-  auto path_it = path_abs.begin();
-  for (; ws_it != ws_abs.end(); ++ws_it, ++path_it) {
-    if (path_it == path_abs.end())
-      return false;  // path is shorter than workspace
-#ifdef _WIN32
-    // Case-insensitive comparison on Windows.
-    auto to_lower = [](std::string s) {
-      std::transform(s.begin(), s.end(), s.begin(),
-                     [](unsigned char c) { return std::tolower(c); });
-      return s;
-    };
-    if (to_lower(ws_it->string()) != to_lower(path_it->string()))
-      return false;
-#else
-    if (*ws_it != *path_it)
-      return false;
-#endif
-  }
-
-  return true;
+  // NOTE: there is deliberately no `path_str.find("..")` check here. After
+  // weakly_canonical the ".." segments are already resolved, so it caught no
+  // traversal — it only rejected legitimate names that happen to contain two
+  // dots, e.g. "report..md" or "v1..2/notes.txt".
+  return path_within(ws_abs, path_abs);
 }
 
 bool Sandbox::ValidateShellCommand(const std::string& command) {
