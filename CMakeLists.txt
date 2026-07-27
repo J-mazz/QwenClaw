@@ -295,6 +295,7 @@ set(QUANTCLAW_CORE_MODULE_SOURCES
     src/constants.cppm
     src/config.cppm
     src/common/defer.cppm
+    src/common/atomic_file.cppm
     src/providers/llm_provider.cppm
     src/providers/embedding_provider.cppm
     src/providers/curl_raii.cppm
@@ -624,6 +625,7 @@ if(BUILD_TESTS)
         tests/test_llama_provider.cpp
         tests/test_security_sandbox.cpp
         tests/test_concurrency.cpp
+        tests/test_atomic_file.cpp
         tests/test_tool_registry.cpp
         tests/test_tool_chain.cpp
         tests/test_tool_permissions.cpp

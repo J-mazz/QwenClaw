@@ -12,6 +12,7 @@ module quantclaw.gateway.rpc_handlers;
 import std;
 import nlohmann.json;
 
+import quantclaw.common.atomic_file;
 import quantclaw.config;
 import quantclaw.constants;
 import quantclaw.core.agent_loop;
@@ -121,11 +122,13 @@ void write_config_document(const std::string& raw,
         config_file, config_file + ".bak",
         std::filesystem::copy_options::overwrite_existing, ec);
   }
-  std::ofstream out(config_file, std::ios::binary | std::ios::trunc);
-  if (!out) {
-    throw std::runtime_error("config: cannot write " + config_file);
+  // Atomic for real, not just in the comment: a truncating ofstream leaves the
+  // config empty or half-written if anything interrupts it, losing every
+  // provider and key the user configured.
+  std::string err;
+  if (!WriteFileAtomically(config_file, raw, &err)) {
+    throw std::runtime_error("config: cannot write " + config_file + ": " + err);
   }
-  out << raw;
 }
 
 // Read-modify-write a single skills.entries.<name> entry in the on-disk
@@ -170,15 +173,11 @@ void persist_skill_entry(const std::string& skill_name,
     std::filesystem::copy_file(
         config_file, config_file + ".bak",
         std::filesystem::copy_options::overwrite_existing, ec);
-  } else {
-    std::filesystem::create_directories(
-        std::filesystem::path(config_file).parent_path(), ec);
   }
-  std::ofstream out(config_file, std::ios::binary | std::ios::trunc);
-  if (!out) {
-    throw std::runtime_error("config: cannot write " + config_file);
+  std::string err;
+  if (!WriteFileAtomically(config_file, doc.dump(2) + "\n", &err)) {
+    throw std::runtime_error("config: cannot write " + config_file + ": " + err);
   }
-  out << doc.dump(2) << "\n";
 }
 
 // ---------------------------------------------------------------------------

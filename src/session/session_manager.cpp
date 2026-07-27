@@ -9,6 +9,7 @@ module quantclaw.session.session_manager;
 
 import std;
 import nlohmann.json;
+import quantclaw.common.atomic_file;
 import quantclaw.core.content_block;
 
 namespace quantclaw {
@@ -421,10 +422,13 @@ void SessionManager::SaveStore() {
       entry["subagentRole"] = info.subagent_role;
     j[key] = entry;
   }
-  std::ofstream file(store_path);
-  if (file.is_open()) {
-    file << j.dump(2);
-    file.close();
+  // Atomic replace: this file is the index of every session the user has, and
+  // it is rewritten on every appended message. A truncating write leaves a
+  // window on each one where a crash loses the lot.
+  std::string err;
+  if (!WriteFileAtomically(store_path, j.dump(2), &err)) {
+    logger_->error("Failed to persist session store {}: {}", store_path.string(),
+                   err);
   }
 }
 
