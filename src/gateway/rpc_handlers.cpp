@@ -679,7 +679,7 @@ void register_rpc_handlers(
   server.RegisterHandler(
       methods::kGatewayHealth,
       [&server, logger](const nlohmann::json& /*params*/,
-                        ClientConnection& /*client*/) -> nlohmann::json {
+                        const ClientConnection& /*client*/) -> nlohmann::json {
         return {{"status", "ok"},
                 {"uptime", server.GetUptimeSeconds()},
                 {"version", quantclaw::kVersion}};
@@ -689,7 +689,7 @@ void register_rpc_handlers(
   server.RegisterHandler(methods::kGatewayStatus,
                          [&server, session_manager, logger](
                              const nlohmann::json& /*params*/,
-                             ClientConnection& /*client*/) -> nlohmann::json {
+                             const ClientConnection& /*client*/) -> nlohmann::json {
                            auto sessions = session_manager->ListSessions();
                            return {{"running", true},
                                    {"port", server.GetPort()},
@@ -708,7 +708,7 @@ void register_rpc_handlers(
   server.RegisterHandler(
       methods::kConfigGet,
       [&config](const nlohmann::json& params,
-                ClientConnection& /*client*/) -> nlohmann::json {
+                const ClientConnection& /*client*/) -> nlohmann::json {
         std::string path_param = params.value("path", "");
 
         if (!path_param.empty()) {
@@ -764,7 +764,7 @@ void register_rpc_handlers(
   server.RegisterHandler(
       methods::kConfigSet,
       [logger, reload_fn](const nlohmann::json& params,
-                          ClientConnection& /*client*/) -> nlohmann::json {
+                          const ClientConnection& /*client*/) -> nlohmann::json {
         if (params.contains("raw")) {
           write_config_document(params.value("raw", ""),
                                 params.value("baseHash", ""));
@@ -801,7 +801,7 @@ void register_rpc_handlers(
 
   auto execute_agent_request =
       [session_manager, agent_loop, prompt_builder, logger, &server](
-          const nlohmann::json& params, ClientConnection& /*client*/,
+          const nlohmann::json& params, const ClientConnection& /*client*/,
           quantclaw::AgentEventCallback event_callback) -> AgentRequestResult {
     std::string session_key = params.value("sessionKey", "agent:main:main");
     std::string message = params.value("message", "");
@@ -932,7 +932,7 @@ void register_rpc_handlers(
       methods::kAgentRequest,
       [execute_agent_request, &server,
        logger](const nlohmann::json& params,
-               ClientConnection& client) -> nlohmann::json {
+               const ClientConnection& client) -> nlohmann::json {
         auto result = execute_agent_request(
             params, client,
             [&server, &client, logger](const quantclaw::AgentEvent& event) {
@@ -949,7 +949,7 @@ void register_rpc_handlers(
   server.RegisterHandler(
       methods::kAgentStop,
       [agent_loop, logger](const nlohmann::json& /*params*/,
-                           ClientConnection& /*client*/) -> nlohmann::json {
+                           const ClientConnection& /*client*/) -> nlohmann::json {
         agent_loop->Stop();
         return {{"ok", true}};
       });
@@ -959,7 +959,7 @@ void register_rpc_handlers(
       methods::kSessionsList,
       [session_manager, &config,
        logger](const nlohmann::json& params,
-               ClientConnection& /*client*/) -> nlohmann::json {
+               const ClientConnection& /*client*/) -> nlohmann::json {
         int limit = params.value("limit", 0);
         int offset = params.value("offset", 0);
 
@@ -1035,7 +1035,7 @@ void register_rpc_handlers(
       methods::kSessionsHistory,
       [session_manager,
        logger](const nlohmann::json& params,
-               ClientConnection& /*client*/) -> nlohmann::json {
+               const ClientConnection& /*client*/) -> nlohmann::json {
         std::string session_key = params.value("sessionKey", "");
         int limit = params.value("limit", -1);
 
@@ -1071,7 +1071,7 @@ void register_rpc_handlers(
   server.RegisterHandler(methods::kSessionsDelete,
                          [session_manager, logger](
                              const nlohmann::json& params,
-                             ClientConnection& /*client*/) -> nlohmann::json {
+                             const ClientConnection& /*client*/) -> nlohmann::json {
                            // UI sends "key"; legacy clients send "sessionKey"
                            std::string session_key = params.value("key", "");
                            if (session_key.empty())
@@ -1088,7 +1088,7 @@ void register_rpc_handlers(
   server.RegisterHandler(methods::kSessionsReset,
                          [session_manager, logger](
                              const nlohmann::json& params,
-                             ClientConnection& /*client*/) -> nlohmann::json {
+                             const ClientConnection& /*client*/) -> nlohmann::json {
                            std::string session_key =
                                params.value("sessionKey", "");
                            if (session_key.empty()) {
@@ -1102,7 +1102,7 @@ void register_rpc_handlers(
   server.RegisterHandler(
       methods::kChannelsList,
       [&config, logger](const nlohmann::json& /*params*/,
-                        ClientConnection& /*client*/) -> nlohmann::json {
+                        const ClientConnection& /*client*/) -> nlohmann::json {
         nlohmann::json result = nlohmann::json::array();
         // CLI channel is always present
         result.push_back({{"id", "cli"},
@@ -1127,7 +1127,7 @@ void register_rpc_handlers(
   server.RegisterHandler(
       methods::kChannelsStatus,
       [&config, logger](const nlohmann::json& /*params*/,
-                        ClientConnection& /*client*/) -> nlohmann::json {
+                        const ClientConnection& /*client*/) -> nlohmann::json {
         auto now_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
                           std::chrono::system_clock::now().time_since_epoch())
                           .count();
@@ -1177,7 +1177,7 @@ void register_rpc_handlers(
   server.RegisterHandler(
       "channels.logout",
       [logger](const nlohmann::json& params,
-               ClientConnection& /*client*/) -> nlohmann::json {
+               const ClientConnection& /*client*/) -> nlohmann::json {
         std::string id = params.value("id", "");
         logger->info("channels.logout requested for channel '{}'", id);
         return {{"ok", true}};
@@ -1188,7 +1188,7 @@ void register_rpc_handlers(
   server.RegisterHandler(
       "agents.list",
       [](const nlohmann::json& /*params*/,
-         ClientConnection& /*client*/) -> nlohmann::json {
+         const ClientConnection& /*client*/) -> nlohmann::json {
         return {{"defaultId", "main"},
                 {"mainKey", "agent:main:main"},
                 {"scope", "local"},
@@ -1206,7 +1206,7 @@ void register_rpc_handlers(
   server.RegisterHandler(
       methods::kChainExecute,
       [tool_registry, logger](const nlohmann::json& params,
-                              ClientConnection& /*client*/) -> nlohmann::json {
+                              const ClientConnection& /*client*/) -> nlohmann::json {
         auto chain_def = quantclaw::ToolChainExecutor::ParseChain(params);
         quantclaw::ToolExecutorFn executor =
             [tool_registry](const std::string& name,
@@ -1223,7 +1223,7 @@ void register_rpc_handlers(
     server.RegisterHandler(
         methods::kConfigReload,
         [reload_fn](const nlohmann::json& /*params*/,
-                    ClientConnection& /*client*/) -> nlohmann::json {
+                    const ClientConnection& /*client*/) -> nlohmann::json {
           reload_fn();
           return {{"ok", true}};
         });
@@ -1235,7 +1235,7 @@ void register_rpc_handlers(
   server.RegisterHandler(
       "config.apply",
       [reload_fn, logger](const nlohmann::json& params,
-                          ClientConnection& /*client*/) -> nlohmann::json {
+                          const ClientConnection& /*client*/) -> nlohmann::json {
         if (params.contains("raw")) {
           write_config_document(params.value("raw", ""),
                                 params.value("baseHash", ""));
@@ -1252,7 +1252,7 @@ void register_rpc_handlers(
   server.RegisterHandler(
       "agents.files.list",
       [](const nlohmann::json& params,
-         ClientConnection& /*client*/) -> nlohmann::json {
+         const ClientConnection& /*client*/) -> nlohmann::json {
         std::string agent_id = params.value("agentId", "main");
         std::string dir = agent_workspace_dir(agent_id);
         nlohmann::json files = nlohmann::json::array();
@@ -1280,7 +1280,7 @@ void register_rpc_handlers(
   server.RegisterHandler(
       "agents.files.get",
       [](const nlohmann::json& params,
-         ClientConnection& /*client*/) -> nlohmann::json {
+         const ClientConnection& /*client*/) -> nlohmann::json {
         std::string agent_id = params.value("agentId", "main");
         std::string name = params.value("name", "");
         if (!agent_file_name_ok(name)) {
@@ -1296,7 +1296,7 @@ void register_rpc_handlers(
   server.RegisterHandler(
       "agents.files.set",
       [logger](const nlohmann::json& params,
-               ClientConnection& /*client*/) -> nlohmann::json {
+               const ClientConnection& /*client*/) -> nlohmann::json {
         std::string agent_id = params.value("agentId", "main");
         std::string name = params.value("name", "");
         if (!agent_file_name_ok(name)) {
@@ -1328,7 +1328,7 @@ void register_rpc_handlers(
   server.RegisterHandler(
       "system-presence",
       [](const nlohmann::json& /*params*/,
-         ClientConnection& /*client*/) -> nlohmann::json {
+         const ClientConnection& /*client*/) -> nlohmann::json {
         return nlohmann::json::array();
       });
 
@@ -1336,7 +1336,7 @@ void register_rpc_handlers(
   server.RegisterHandler(
       "last-heartbeat",
       [&server](const nlohmann::json& /*params*/,
-                ClientConnection& /*client*/) -> nlohmann::json {
+                const ClientConnection& /*client*/) -> nlohmann::json {
         return {{"ok", true},
                 {"timestamp", usage_now_ms()},
                 {"uptimeSeconds", server.GetUptimeSeconds()}};
@@ -1347,7 +1347,7 @@ void register_rpc_handlers(
   {
     auto exec_approvals_get =
         [](const nlohmann::json& /*params*/,
-           ClientConnection& /*client*/) -> nlohmann::json {
+           const ClientConnection& /*client*/) -> nlohmann::json {
       return build_exec_approvals_snapshot();
     };
     server.RegisterHandler("exec.approvals.get", exec_approvals_get);
@@ -1355,7 +1355,7 @@ void register_rpc_handlers(
 
     auto exec_approvals_set =
         [logger](const nlohmann::json& params,
-                 ClientConnection& /*client*/) -> nlohmann::json {
+                 const ClientConnection& /*client*/) -> nlohmann::json {
       write_exec_approvals(params.value("file", nlohmann::json::object()),
                            params.value("baseHash", ""));
       logger->info("exec.approvals.set: document replaced");
@@ -1370,7 +1370,7 @@ void register_rpc_handlers(
       "exec.approval.resolve",
       [exec_approval_mgr, logger](
           const nlohmann::json& params,
-          ClientConnection& /*client*/) -> nlohmann::json {
+          const ClientConnection& /*client*/) -> nlohmann::json {
         std::string id = params.value("id", "");
         if (id.empty()) {
           throw std::runtime_error("exec.approval.resolve: id is required");
@@ -1401,7 +1401,7 @@ void register_rpc_handlers(
   server.RegisterHandler(
       "device.pair.approve",
       [logger](const nlohmann::json& params,
-               ClientConnection& /*client*/) -> nlohmann::json {
+               const ClientConnection& /*client*/) -> nlohmann::json {
         std::string req = params.value("requestId", "");
         logger->info("device.pair.approve: requestId={}", req);
         return {{"ok", true}, {"requestId", req}};
@@ -1409,13 +1409,13 @@ void register_rpc_handlers(
   server.RegisterHandler(
       "device.pair.reject",
       [](const nlohmann::json& params,
-         ClientConnection& /*client*/) -> nlohmann::json {
+         const ClientConnection& /*client*/) -> nlohmann::json {
         return {{"ok", true}, {"requestId", params.value("requestId", "")}};
       });
   server.RegisterHandler(
       "device.token.revoke",
       [](const nlohmann::json& params,
-         ClientConnection& /*client*/) -> nlohmann::json {
+         const ClientConnection& /*client*/) -> nlohmann::json {
         return {{"ok", true}, {"deviceId", params.value("deviceId", "")}};
       });
 
@@ -1423,7 +1423,7 @@ void register_rpc_handlers(
   server.RegisterHandler(
       "update.run",
       [](const nlohmann::json& /*params*/,
-         ClientConnection& /*client*/) -> nlohmann::json {
+         const ClientConnection& /*client*/) -> nlohmann::json {
         return {{"ok", false},
                 {"restartDelayMs", 0},
                 {"message",
@@ -1441,7 +1441,7 @@ void register_rpc_handlers(
       methods::kOcChatSend,
       [execute_agent_request, &server,
        logger](const nlohmann::json& params,
-               ClientConnection& client) -> nlohmann::json {
+               const ClientConnection& client) -> nlohmann::json {
         std::string session_key = params.value("sessionKey", "agent:main:main");
         std::string idempotency_key = params.value("idempotencyKey", "");
         auto result = execute_agent_request(
@@ -1509,7 +1509,7 @@ void register_rpc_handlers(
       methods::kOcChatHistory,
       [session_manager,
        logger](const nlohmann::json& params,
-               ClientConnection& /*client*/) -> nlohmann::json {
+               const ClientConnection& /*client*/) -> nlohmann::json {
         std::string session_key = params.value("sessionKey", "");
         int limit = params.value("limit", -1);
 
@@ -1545,7 +1545,7 @@ void register_rpc_handlers(
   server.RegisterHandler(
       methods::kOcChatAbort,
       [agent_loop, logger](const nlohmann::json& /*params*/,
-                           ClientConnection& /*client*/) -> nlohmann::json {
+                           const ClientConnection& /*client*/) -> nlohmann::json {
         agent_loop->Stop();
         return {{"ok", true}};
       });
@@ -1554,7 +1554,7 @@ void register_rpc_handlers(
   server.RegisterHandler(
       methods::kOcHealth,
       [&server, logger](const nlohmann::json& /*params*/,
-                        ClientConnection& /*client*/) -> nlohmann::json {
+                        const ClientConnection& /*client*/) -> nlohmann::json {
         return {{"status", "ok"},
                 {"uptime", server.GetUptimeSeconds()},
                 {"version", quantclaw::kVersion}};
@@ -1567,7 +1567,7 @@ void register_rpc_handlers(
       methods::kOcStatus,
       [&server, session_manager, &config,
        logger](const nlohmann::json& /*params*/,
-               ClientConnection& /*client*/) -> nlohmann::json {
+               const ClientConnection& /*client*/) -> nlohmann::json {
         auto sessions = session_manager->ListSessions();
 
         // Build sessions.recent (last 5, lightweight)
@@ -1609,7 +1609,7 @@ void register_rpc_handlers(
       methods::kOcModelsList,
       [&config, provider_registry,
        logger](const nlohmann::json& /*params*/,
-               ClientConnection& /*client*/) -> nlohmann::json {
+               const ClientConnection& /*client*/) -> nlohmann::json {
         nlohmann::json models = nlohmann::json::array();
 
         // Active model first
@@ -1642,7 +1642,7 @@ void register_rpc_handlers(
   server.RegisterHandler(
       methods::kOcToolsCatalog,
       [tool_registry, logger](const nlohmann::json& params,
-                              ClientConnection& /*client*/) -> nlohmann::json {
+                              const ClientConnection& /*client*/) -> nlohmann::json {
         std::string agent_id = params.value("agentId", "main");
         auto schemas = tool_registry->GetToolSchemas();
 
@@ -1679,7 +1679,7 @@ void register_rpc_handlers(
       methods::kOcSessionsPreview,
       [session_manager,
        logger](const nlohmann::json& params,
-               ClientConnection& /*client*/) -> nlohmann::json {
+               const ClientConnection& /*client*/) -> nlohmann::json {
         std::string session_key = params.value("sessionKey", "");
         if (session_key.empty()) {
           throw std::runtime_error("sessionKey is required");
@@ -1709,7 +1709,7 @@ void register_rpc_handlers(
       methods::kSessionsPatch,
       [session_manager,
        logger](const nlohmann::json& params,
-               ClientConnection& /*client*/) -> nlohmann::json {
+               const ClientConnection& /*client*/) -> nlohmann::json {
         // UI sends "key"; legacy clients send "sessionKey"
         std::string session_key = params.value("key", "");
         if (session_key.empty())
@@ -1743,7 +1743,7 @@ void register_rpc_handlers(
       methods::kSessionsCompact,
       [session_manager, agent_loop,
        logger](const nlohmann::json& params,
-               ClientConnection& /*client*/) -> nlohmann::json {
+               const ClientConnection& /*client*/) -> nlohmann::json {
         std::string session_key = params.value("sessionKey", "");
         if (session_key.empty()) {
           throw std::runtime_error("sessionKey is required");
@@ -1779,7 +1779,7 @@ void register_rpc_handlers(
         methods::kSkillsStatus,
         [skill_loader, &config,
          logger](const nlohmann::json& /*params*/,
-                 ClientConnection& /*client*/) -> nlohmann::json {
+                 const ClientConnection& /*client*/) -> nlohmann::json {
           const char* home = std::getenv("HOME");
           std::string home_str = home ? home : "/tmp";
           auto workspace_path = std::filesystem::path(home_str) /
@@ -1889,7 +1889,7 @@ void register_rpc_handlers(
     server.RegisterHandler(
         methods::kSkillsInstall,
         [skill_loader, logger](const nlohmann::json& params,
-                               ClientConnection& /*client*/) -> nlohmann::json {
+                               const ClientConnection& /*client*/) -> nlohmann::json {
           std::string name = params.value("name", "");
           if (name.empty()) {
             throw std::runtime_error("skill name is required");
@@ -1909,7 +1909,7 @@ void register_rpc_handlers(
     server.RegisterHandler(
         methods::kCronList,
         [cron_scheduler](const nlohmann::json& params,
-                         ClientConnection& /*client*/) -> nlohmann::json {
+                         const ClientConnection& /*client*/) -> nlohmann::json {
           int limit = params.value("limit", 0);
           int offset = params.value("offset", 0);
           auto jobs = cron_scheduler->ListJobs();
@@ -1972,7 +1972,7 @@ void register_rpc_handlers(
     server.RegisterHandler(
         methods::kCronAdd,
         [cron_scheduler](const nlohmann::json& params,
-                         ClientConnection& /*client*/) -> nlohmann::json {
+                         const ClientConnection& /*client*/) -> nlohmann::json {
           std::string name = params.value("name", "");
           std::string session_key =
               params.value("sessionKey", "agent:main:main");
@@ -2025,7 +2025,7 @@ void register_rpc_handlers(
     server.RegisterHandler(
         methods::kCronRemove,
         [cron_scheduler](const nlohmann::json& params,
-                         ClientConnection& /*client*/) -> nlohmann::json {
+                         const ClientConnection& /*client*/) -> nlohmann::json {
           std::string id = params.value("id", "");
           if (id.empty()) {
             throw std::runtime_error("cron job id is required");
@@ -2042,7 +2042,7 @@ void register_rpc_handlers(
         methods::kCronUpdate,
         [cron_scheduler,
          logger](const nlohmann::json& params,
-                 ClientConnection& /*client*/) -> nlohmann::json {
+                 const ClientConnection& /*client*/) -> nlohmann::json {
           std::string id = params.value("id", "");
           if (id.empty()) {
             throw std::runtime_error("cron job id is required");
@@ -2096,7 +2096,7 @@ void register_rpc_handlers(
         methods::kCronRun,
         [cron_scheduler, agent_loop, session_manager, prompt_builder,
          logger](const nlohmann::json& params,
-                 ClientConnection& /*client*/) -> nlohmann::json {
+                 const ClientConnection& /*client*/) -> nlohmann::json {
           std::string id = params.value("id", "");
           if (id.empty()) {
             throw std::runtime_error("cron job id is required");
@@ -2158,7 +2158,7 @@ void register_rpc_handlers(
         methods::kCronRuns,
         [cron_scheduler,
          logger](const nlohmann::json& params,
-                 ClientConnection& /*client*/) -> nlohmann::json {
+                 const ClientConnection& /*client*/) -> nlohmann::json {
           std::string filter_id = params.value("id", "");
           int limit = params.value("limit", 0);
           int offset = params.value("offset", 0);
@@ -2214,7 +2214,7 @@ void register_rpc_handlers(
     server.RegisterHandler(methods::kExecApprovalReq,
                            [exec_approval_mgr, logger](
                                const nlohmann::json& params,
-                               ClientConnection& /*client*/) -> nlohmann::json {
+                               const ClientConnection& /*client*/) -> nlohmann::json {
                              std::string command = params.value("command", "");
                              if (command.empty()) {
                                throw std::runtime_error("command is required");
@@ -2252,7 +2252,7 @@ void register_rpc_handlers(
         methods::kExecApprovals,
         [exec_approval_mgr,
          logger](const nlohmann::json& /*params*/,
-                 ClientConnection& /*client*/) -> nlohmann::json {
+                 const ClientConnection& /*client*/) -> nlohmann::json {
           const auto& cfg = exec_approval_mgr->GetConfig();
 
           std::string mode_str;
@@ -2293,7 +2293,7 @@ void register_rpc_handlers(
   server.RegisterHandler(
       methods::kModelsSet,
       [agent_loop, logger](const nlohmann::json& params,
-                           ClientConnection& /*client*/) -> nlohmann::json {
+                           const ClientConnection& /*client*/) -> nlohmann::json {
         std::string model = params.value("model", "");
         if (model.empty()) {
           throw std::runtime_error("model is required");
@@ -2308,7 +2308,7 @@ void register_rpc_handlers(
     server.RegisterHandler(
         methods::kPluginsList,
         [plugin_system](const nlohmann::json& /*params*/,
-                        ClientConnection& /*client*/) -> nlohmann::json {
+                        const ClientConnection& /*client*/) -> nlohmann::json {
           return {{"plugins", plugin_system->Registry().ToJson()}};
         });
 
@@ -2316,7 +2316,7 @@ void register_rpc_handlers(
     server.RegisterHandler(
         methods::kPluginsTools,
         [plugin_system](const nlohmann::json& /*params*/,
-                        ClientConnection& /*client*/) -> nlohmann::json {
+                        const ClientConnection& /*client*/) -> nlohmann::json {
           return {{"tools", plugin_system->GetToolSchemas()}};
         });
 
@@ -2324,7 +2324,7 @@ void register_rpc_handlers(
     server.RegisterHandler(
         methods::kPluginsCallTool,
         [plugin_system](const nlohmann::json& params,
-                        ClientConnection& /*client*/) -> nlohmann::json {
+                        const ClientConnection& /*client*/) -> nlohmann::json {
           std::string name = params.value("toolName", "");
           if (name.empty())
             throw std::runtime_error("toolName is required");
@@ -2336,7 +2336,7 @@ void register_rpc_handlers(
     server.RegisterHandler(
         methods::kPluginsServices,
         [plugin_system](const nlohmann::json& params,
-                        ClientConnection& /*client*/) -> nlohmann::json {
+                        const ClientConnection& /*client*/) -> nlohmann::json {
           std::string action = params.value("action", "list");
           if (action == "start") {
             return plugin_system->StartService(params.value("serviceId", ""));
@@ -2351,7 +2351,7 @@ void register_rpc_handlers(
     server.RegisterHandler(
         methods::kPluginsProviders,
         [plugin_system](const nlohmann::json& /*params*/,
-                        ClientConnection& /*client*/) -> nlohmann::json {
+                        const ClientConnection& /*client*/) -> nlohmann::json {
           return {{"providers", plugin_system->ListProviders()}};
         });
 
@@ -2359,7 +2359,7 @@ void register_rpc_handlers(
     server.RegisterHandler(
         methods::kPluginsCommands,
         [plugin_system](const nlohmann::json& params,
-                        ClientConnection& /*client*/) -> nlohmann::json {
+                        const ClientConnection& /*client*/) -> nlohmann::json {
           std::string action = params.value("action", "list");
           if (action == "execute") {
             std::string cmd = params.value("command", "");
@@ -2373,7 +2373,7 @@ void register_rpc_handlers(
     server.RegisterHandler(
         methods::kPluginsGateway,
         [plugin_system](const nlohmann::json& params,
-                        ClientConnection& /*client*/) -> nlohmann::json {
+                        const ClientConnection& /*client*/) -> nlohmann::json {
           std::string action = params.value("action", "list");
           if (action == "list") {
             return {{"methods", plugin_system->ListGatewayMethods()}};
@@ -2390,7 +2390,7 @@ void register_rpc_handlers(
     server.RegisterHandler(
         methods::kQueueStatus,
         [command_queue](const nlohmann::json& params,
-                        ClientConnection& /*client*/) -> nlohmann::json {
+                        const ClientConnection& /*client*/) -> nlohmann::json {
           std::string session_key = params.value("sessionKey", "");
           if (!session_key.empty()) {
             return command_queue->SessionQueueStatus(session_key);
@@ -2402,7 +2402,7 @@ void register_rpc_handlers(
     server.RegisterHandler(
         methods::kQueueConfigure,
         [command_queue](const nlohmann::json& params,
-                        ClientConnection& /*client*/) -> nlohmann::json {
+                        const ClientConnection& /*client*/) -> nlohmann::json {
           std::string session_key = params.value("sessionKey", "");
           if (session_key.empty()) {
             // Global config update
@@ -2425,7 +2425,7 @@ void register_rpc_handlers(
     server.RegisterHandler(
         methods::kQueueCancel,
         [command_queue](const nlohmann::json& params,
-                        ClientConnection& /*client*/) -> nlohmann::json {
+                        const ClientConnection& /*client*/) -> nlohmann::json {
           std::string command_id = params.value("commandId", "");
           if (command_id.empty()) {
             throw std::runtime_error("commandId is required");
@@ -2438,7 +2438,7 @@ void register_rpc_handlers(
     server.RegisterHandler(
         methods::kQueueAbort,
         [command_queue](const nlohmann::json& params,
-                        ClientConnection& /*client*/) -> nlohmann::json {
+                        const ClientConnection& /*client*/) -> nlohmann::json {
           std::string session_key = params.value("sessionKey", "");
           if (session_key.empty()) {
             throw std::runtime_error("sessionKey is required");
@@ -2458,7 +2458,7 @@ void register_rpc_handlers(
     server.RegisterHandler(
         methods::kMemoryStatus,
         [workspace, logger](const nlohmann::json& /*params*/,
-                            ClientConnection& /*client*/) -> nlohmann::json {
+                            const ClientConnection& /*client*/) -> nlohmann::json {
           quantclaw::MemorySearch search(logger);
           search.IndexDirectory(workspace);
           return search.Stats();
@@ -2468,7 +2468,7 @@ void register_rpc_handlers(
     server.RegisterHandler(
         methods::kMemorySearch,
         [workspace, logger](const nlohmann::json& params,
-                            ClientConnection& /*client*/) -> nlohmann::json {
+                            const ClientConnection& /*client*/) -> nlohmann::json {
           std::string query = params.value("query", "");
           int max_results = params.value("maxResults", 10);
           if (query.empty()) {
@@ -2497,7 +2497,7 @@ void register_rpc_handlers(
   server.RegisterHandler(
       "agent.identity.get",
       [&config](const nlohmann::json& /*params*/,
-                ClientConnection& /*client*/) -> nlohmann::json {
+                const ClientConnection& /*client*/) -> nlohmann::json {
         return {{"agentId", "main"},
                 {"name", "QuantClaw Agent"},
                 {"avatar", ""},
@@ -2508,7 +2508,7 @@ void register_rpc_handlers(
   // QuantClaw is a single-node deployment; return empty list.
   server.RegisterHandler("node.list",
                          [](const nlohmann::json& /*params*/,
-                            ClientConnection& /*client*/) -> nlohmann::json {
+                            const ClientConnection& /*client*/) -> nlohmann::json {
                            return nlohmann::json::array();
                          });
 
@@ -2516,7 +2516,7 @@ void register_rpc_handlers(
   // Device pairing not implemented; return empty list so UI doesn't hang.
   server.RegisterHandler("device.pair.list",
                          [](const nlohmann::json& /*params*/,
-                            ClientConnection& /*client*/) -> nlohmann::json {
+                            const ClientConnection& /*client*/) -> nlohmann::json {
                            return nlohmann::json::array();
                          });
 
@@ -2528,7 +2528,7 @@ void register_rpc_handlers(
   server.RegisterHandler(
       "logs.tail",
       [logger, log_file_path](const nlohmann::json& params,
-                              ClientConnection& /*client*/) -> nlohmann::json {
+                              const ClientConnection& /*client*/) -> nlohmann::json {
         int req_limit = std::max(1, params.value("limit", 200));
         long long max_bytes =
             std::max(1LL, params.value("maxBytes", 512LL * 1024));
@@ -2597,7 +2597,7 @@ void register_rpc_handlers(
   server.RegisterHandler(
       "config.schema",
       [](const nlohmann::json& /*params*/,
-         ClientConnection& /*client*/) -> nlohmann::json {
+         const ClientConnection& /*client*/) -> nlohmann::json {
         nlohmann::json schema = {
             {"type", "object"},
             {"properties",
@@ -2644,7 +2644,7 @@ void register_rpc_handlers(
     server.RegisterHandler(
         "cron.status",
         [cron_scheduler](const nlohmann::json& /*params*/,
-                         ClientConnection& /*client*/) -> nlohmann::json {
+                         const ClientConnection& /*client*/) -> nlohmann::json {
           auto jobs = cron_scheduler->ListJobs();
           int enabled_count = 0;
           long long next_wake = 0;
@@ -2675,7 +2675,7 @@ void register_rpc_handlers(
         "skills.update",
         [skill_loader, &config, logger,
          reload_fn](const nlohmann::json& params,
-                    ClientConnection& /*client*/) -> nlohmann::json {
+                    const ClientConnection& /*client*/) -> nlohmann::json {
           std::string skill_key = params.value("skillKey", "");
           if (skill_key.empty()) {
             throw std::runtime_error("skillKey is required");
@@ -2744,7 +2744,7 @@ void register_rpc_handlers(
       "sessions.usage",
       [session_manager, &config](
           const nlohmann::json& params,
-          ClientConnection& /*client*/) -> nlohmann::json {
+          const ClientConnection& /*client*/) -> nlohmann::json {
         return compute_sessions_usage(*session_manager, config,
                                       params.value("startDate", ""),
                                       params.value("endDate", ""));
@@ -2755,7 +2755,7 @@ void register_rpc_handlers(
   server.RegisterHandler(
       "usage.cost",
       [session_manager](const nlohmann::json& params,
-                        ClientConnection& /*client*/) -> nlohmann::json {
+                        const ClientConnection& /*client*/) -> nlohmann::json {
         return compute_usage_cost(*session_manager,
                                   params.value("startDate", ""),
                                   params.value("endDate", ""));
@@ -2766,7 +2766,7 @@ void register_rpc_handlers(
   server.RegisterHandler(
       "sessions.usage.timeseries",
       [session_manager](const nlohmann::json& params,
-                        ClientConnection& /*client*/) -> nlohmann::json {
+                        const ClientConnection& /*client*/) -> nlohmann::json {
         std::string key = params.value("key", params.value("sessionId", ""));
         if (key.empty()) {
           return {{"sessionId", nullptr}, {"points", nlohmann::json::array()}};
@@ -2779,7 +2779,7 @@ void register_rpc_handlers(
   server.RegisterHandler(
       "sessions.usage.logs",
       [session_manager](const nlohmann::json& params,
-                        ClientConnection& /*client*/) -> nlohmann::json {
+                        const ClientConnection& /*client*/) -> nlohmann::json {
         std::string key = params.value("key", params.value("sessionId", ""));
         if (key.empty()) {
           return {{"logs", nlohmann::json::array()}};

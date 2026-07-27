@@ -46,6 +46,17 @@ class ToolRegistry {
 
  private:
 	std::shared_ptr<spdlog::logger> logger_;
+
+	// Guards tools_, tool_schemas_ and external_tools_. These are not
+	// startup-only: MCP servers register their tools whenever a connection comes
+	// up, while agent threads are already executing tools and building schema
+	// lists for outbound requests.
+	//
+	// Handlers are NEVER invoked with this held. Tool calls run for minutes, and
+	// the "chain" meta-tool re-enters ExecuteTool for each of its steps, which
+	// would self-deadlock on a non-recursive mutex. ExecuteTool copies the
+	// handler out under a shared lock and releases before calling it.
+	mutable std::shared_mutex registry_mu_;
 	std::unordered_map<std::string,
 										 std::function<std::string(const nlohmann::json&)>>
 			tools_;
@@ -134,8 +145,17 @@ class ToolRegistry {
 													const nlohmann::json& parameters) const;
 
  private:
-	// Permission check helper
+	// Permission check helper (acquires registry_mu_)
 	bool check_permission(const std::string& tool_name) const;
+
+	// No-lock variants taking the already-resolved external-tool flag. Callers
+	// that hold (or have just released) registry_mu_ use these so a single
+	// public entry point never takes the lock twice — re-acquiring a shared lock
+	// while a writer is queued can deadlock.
+	bool permission_allows(const std::string& tool_name, bool is_external) const;
+	static bool is_mutating_impl(const std::string& tool_name,
+															 const nlohmann::json& params,
+															 bool is_external);
 
 	// Helper to (re-)register a tool without duplicating its schema
 	void register_tool(const std::string& name, const std::string& description,
@@ -155,9 +175,8 @@ class ToolRegistry {
 	std::string web_fetch_tool(const nlohmann::json& params);
 	std::string memory_search_tool(const nlohmann::json& params);
 	std::string memory_get_tool(const nlohmann::json& params);
+	std::string claude_advisor_tool(const nlohmann::json& params);
 
-	bool should_request_mutation_approval(const std::string& tool_name,
-																				const nlohmann::json& params) const;
 	static bool looks_like_network_write(const nlohmann::json& params);
 	static bool looks_like_mutating_action(const nlohmann::json& params);
 	static std::string approval_summary(const std::string& tool_name,

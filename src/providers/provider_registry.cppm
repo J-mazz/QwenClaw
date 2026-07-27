@@ -69,6 +69,9 @@ class ProviderRegistry {
   std::vector<std::string> ProviderIds() const;
   std::vector<ModelAlias> Aliases() const;
   bool HasProvider(const std::string& provider_id) const;
+  // Returns a pointer INTO entries_. Only safe while no other thread can add a
+  // provider: any insert may rehash the map and invalidate it. Read what you
+  // need immediately; do not cache it across calls.
   const ProviderEntry* GetEntry(const std::string& provider_id) const;
   void LoadModelProviders(
       const std::unordered_map<std::string, ProviderConfig>& model_providers);
@@ -89,6 +92,13 @@ class ProviderRegistry {
 
  private:
   std::shared_ptr<spdlog::logger> logger_;
+
+  // Guards all four maps. GetProvider() memoises into instances_ (and can
+  // insert into entries_) on the model-resolution path, which every agent turn
+  // hits from its own thread — so this is a runtime writer, not startup-only.
+  // Holding it across the factory call also makes memoisation atomic: two
+  // threads racing on the same provider id get one instance, not two.
+  mutable std::recursive_mutex mu_;
 
   std::unordered_map<std::string, ProviderFactory> factories_;
   std::unordered_map<std::string, ProviderEntry> entries_;
@@ -117,6 +127,7 @@ ProviderRegistry::ProviderRegistry(std::shared_ptr<spdlog::logger> logger)
 
 void ProviderRegistry::RegisterFactory(const std::string& provider_id,
                                        ProviderFactory factory) {
+  std::lock_guard<std::recursive_mutex> lock(mu_);
   factories_[provider_id] = std::move(factory);
 }
 
@@ -138,15 +149,18 @@ void ProviderRegistry::RegisterBuiltinFactories() {
 }
 
 void ProviderRegistry::AddProvider(const ProviderEntry& entry) {
+  std::lock_guard<std::recursive_mutex> lock(mu_);
   entries_[entry.id] = entry;
 }
 
 void ProviderRegistry::AddAlias(const std::string& alias,
                                 const std::string& target) {
+  std::lock_guard<std::recursive_mutex> lock(mu_);
   alias_map_[alias] = target;
 }
 
 void ProviderRegistry::LoadFromConfig(const nlohmann::json& providers_json) {
+  std::lock_guard<std::recursive_mutex> lock(mu_);
   if (!providers_json.is_object())
     return;
 
@@ -183,6 +197,7 @@ void ProviderRegistry::LoadFromConfig(const nlohmann::json& providers_json) {
 }
 
 void ProviderRegistry::LoadAliases(const nlohmann::json& aliases_json) {
+  std::lock_guard<std::recursive_mutex> lock(mu_);
   if (!aliases_json.is_object())
     return;
 
@@ -200,6 +215,7 @@ void ProviderRegistry::LoadAliases(const nlohmann::json& aliases_json) {
 ModelRef
 ProviderRegistry::ResolveModel(const std::string& raw,
                                const std::string& default_provider) const {
+  std::lock_guard<std::recursive_mutex> lock(mu_);
   auto it = alias_map_.find(raw);
   if (it != alias_map_.end()) {
     return ModelRef::parse(it->second, default_provider);
@@ -209,6 +225,7 @@ ProviderRegistry::ResolveModel(const std::string& raw,
 
 std::shared_ptr<LLMProvider>
 ProviderRegistry::GetProvider(const std::string& provider_id) {
+  std::lock_guard<std::recursive_mutex> lock(mu_);
   auto it = instances_.find(provider_id);
   if (it != instances_.end())
     return it->second;
@@ -235,12 +252,14 @@ ProviderRegistry::GetProvider(const std::string& provider_id) {
 
 std::shared_ptr<LLMProvider>
 ProviderRegistry::GetProviderForModel(const ModelRef& ref) {
+  std::lock_guard<std::recursive_mutex> lock(mu_);
   return GetProvider(ref.provider);
 }
 
 std::shared_ptr<LLMProvider>
 ProviderRegistry::GetProviderWithKey(const std::string& provider_id,
                                      const std::string& api_key) {
+  std::lock_guard<std::recursive_mutex> lock(mu_);
   auto fit = factories_.find(provider_id);
   if (fit == factories_.end()) {
     logger_->error("No factory for provider: {}", provider_id);
@@ -260,6 +279,7 @@ ProviderRegistry::GetProviderWithKey(const std::string& provider_id,
 }
 
 std::vector<std::string> ProviderRegistry::ProviderIds() const {
+  std::lock_guard<std::recursive_mutex> lock(mu_);
   std::vector<std::string> ids;
   for (const auto& [id, _] : entries_) {
     ids.push_back(id);
@@ -269,6 +289,7 @@ std::vector<std::string> ProviderRegistry::ProviderIds() const {
 }
 
 std::vector<ModelAlias> ProviderRegistry::Aliases() const {
+  std::lock_guard<std::recursive_mutex> lock(mu_);
   std::vector<ModelAlias> result;
   for (const auto& [alias, target] : alias_map_) {
     result.push_back({alias, target});
@@ -277,17 +298,20 @@ std::vector<ModelAlias> ProviderRegistry::Aliases() const {
 }
 
 bool ProviderRegistry::HasProvider(const std::string& provider_id) const {
+  std::lock_guard<std::recursive_mutex> lock(mu_);
   return factories_.count(provider_id) > 0 || entries_.count(provider_id) > 0;
 }
 
 const ProviderEntry*
 ProviderRegistry::GetEntry(const std::string& provider_id) const {
+  std::lock_guard<std::recursive_mutex> lock(mu_);
   auto it = entries_.find(provider_id);
   return it != entries_.end() ? &it->second : nullptr;
 }
 
 void ProviderRegistry::LoadModelProviders(
     const std::unordered_map<std::string, ProviderConfig>& model_providers) {
+  std::lock_guard<std::recursive_mutex> lock(mu_);
   for (const auto& [id, prov] : model_providers) {
     auto it = entries_.find(id);
     if (it != entries_.end()) {

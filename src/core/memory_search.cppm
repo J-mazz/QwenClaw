@@ -61,6 +61,17 @@ class MemorySearch {
                      const std::vector<std::string>& query_tokens) const;
   void rebuild_df_index();
 
+  // Body of IndexFile without the lock, so IndexDirectory can index many files
+  // under a single unique_lock. mu_ is not recursive.
+  void index_file_locked(const std::filesystem::path& file);
+  void recompute_stats_locked();
+
+  // Guards every member below. The memory_search tool is callable from several
+  // concurrent agent turns while the workspace file watcher re-indexes, and
+  // Search() scores raw IndexEntry pointers into entries_ — a push_back that
+  // reallocates mid-search would leave those dangling.
+  mutable std::shared_mutex mu_;
+
   std::shared_ptr<spdlog::logger> logger_;
   std::vector<IndexEntry> entries_;
   int total_documents_ = 0;

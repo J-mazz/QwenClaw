@@ -94,7 +94,7 @@ struct ClientConnection {
 };
 
 using RpcHandler = std::function<nlohmann::json(const nlohmann::json& params,
-                                                ClientConnection& client)>;
+                                                const ClientConnection& client)>;
 
 class GatewayServer : public quantclaw::Noncopyable {
  public:

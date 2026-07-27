@@ -24,6 +24,8 @@ void MemorySearch::IndexDirectory(const std::filesystem::path& dir) {
   if (!std::filesystem::exists(dir))
     return;
 
+  std::unique_lock lock(mu_);
+
   std::error_code ec;
   for (const auto& entry :
        std::filesystem::recursive_directory_iterator(dir, ec)) {
@@ -31,24 +33,35 @@ void MemorySearch::IndexDirectory(const std::filesystem::path& dir) {
       continue;
     auto ext = entry.path().extension().string();
     if (ext == ".md" || ext == ".txt" || ext == ".jsonl") {
-      IndexFile(entry.path());
+      index_file_locked(entry.path());
     }
   }
 
   // Recompute average document length and inverted DF index for BM25
-  if (!entries_.empty()) {
-    double total_len = 0;
-    for (const auto& e : entries_) {
-      total_len += e.tokens.size();
-    }
-    avg_doc_length_ = total_len / entries_.size();
-  }
+  recompute_stats_locked();
   rebuild_df_index();
 
   logger_->info("Indexed {} entries from {}", entries_.size(), dir.string());
 }
 
+void MemorySearch::recompute_stats_locked() {
+  if (entries_.empty())
+    return;
+  double total_len = 0;
+  for (const auto& e : entries_) {
+    total_len += e.tokens.size();
+  }
+  avg_doc_length_ = total_len / entries_.size();
+}
+
 void MemorySearch::IndexFile(const std::filesystem::path& file) {
+  std::unique_lock lock(mu_);
+  index_file_locked(file);
+  recompute_stats_locked();
+  rebuild_df_index();
+}
+
+void MemorySearch::index_file_locked(const std::filesystem::path& file) {
   std::ifstream ifs(file);
   if (!ifs.is_open())
     return;
@@ -92,16 +105,8 @@ void MemorySearch::IndexFile(const std::filesystem::path& file) {
     paragraph += line;
   }
   flush_paragraph();
-
-  // Update average document length and DF index for BM25
-  if (!entries_.empty()) {
-    double total_len = 0;
-    for (const auto& e : entries_) {
-      total_len += e.tokens.size();
-    }
-    avg_doc_length_ = total_len / entries_.size();
-  }
-  rebuild_df_index();
+  // Stats/DF rebuild is the caller's job: IndexDirectory does it once for the
+  // whole tree rather than once per file.
 }
 
 std::vector<MemorySearchResult> MemorySearch::Search(const std::string& query,
@@ -109,6 +114,9 @@ std::vector<MemorySearchResult> MemorySearch::Search(const std::string& query,
   auto query_tokens = tokenize(query);
   if (query_tokens.empty())
     return {};
+
+  // Held across scoring: `scored` below stores raw IndexEntry pointers.
+  std::shared_lock lock(mu_);
 
   std::vector<std::pair<double, const IndexEntry*>> scored;
   for (const auto& entry : entries_) {
@@ -136,6 +144,7 @@ std::vector<MemorySearchResult> MemorySearch::Search(const std::string& query,
 }
 
 nlohmann::json MemorySearch::Stats() const {
+  std::shared_lock lock(mu_);
   return {
       {"indexed_entries", entries_.size()},
       {"total_documents", total_documents_},
@@ -144,10 +153,12 @@ nlohmann::json MemorySearch::Stats() const {
 
 void MemorySearch::SetEmbeddingProvider(
     std::shared_ptr<EmbeddingProvider> provider) {
+  std::unique_lock lock(mu_);
   embedding_provider_ = std::move(provider);
 }
 
 void MemorySearch::BuildVectorIndex() {
+  std::unique_lock lock(mu_);
   if (!embedding_provider_) {
     logger_->warn("No embedding provider set, cannot build vector index");
     return;
@@ -192,8 +203,12 @@ void MemorySearch::BuildVectorIndex() {
 std::vector<MemorySearchResult>
 MemorySearch::HybridSearch(const std::string& query,
                            const HybridSearchOptions& opts) const {
-  // Get BM25 results
+  // Get BM25 results. Search() takes the lock itself, so it must be called
+  // before we acquire — mu_ is a shared_mutex and re-acquiring it on this
+  // thread deadlocks if a writer is already queued between the two.
   auto bm25_results = Search(query, opts.max_results * 3);
+
+  std::shared_lock lock(mu_);
 
   // If no embedding provider or empty vector index, fall back to BM25-only
   if (!embedding_provider_ || vector_index_.Size() == 0) {
@@ -340,6 +355,7 @@ MemorySearch::HybridSearch(const std::string& query,
 }
 
 void MemorySearch::Clear() {
+  std::unique_lock lock(mu_);
   entries_.clear();
   total_documents_ = 0;
   avg_doc_length_ = 0;

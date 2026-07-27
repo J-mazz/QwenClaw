@@ -117,6 +117,7 @@ void ToolRegistry::register_tool(
     const std::string& name, const std::string& description,
     nlohmann::json params_schema,
     std::function<std::string(const nlohmann::json&)> handler) {
+  std::unique_lock lock(registry_mu_);
   tools_[name] = std::move(handler);
   tool_schemas_.erase(
       std::remove_if(tool_schemas_.begin(), tool_schemas_.end(),
@@ -228,6 +229,18 @@ void ToolRegistry::RegisterBuiltinTools() {
           R"({"type":"object","properties":{"path":{"type":"string","description":"Relative path within the workspace, e.g. MEMORY.md or memory/notes.md"}},"required":["path"]})"),
       [this](const nlohmann::json& p) { return memory_get_tool(p); });
 
+  // ---- claude_advisor ----
+  register_tool(
+      "claude_advisor",
+      "Consult Claude Opus 4.8 for expert software-engineering advice via the "
+      "official Claude Code CLI (uses its own login; this tool never handles "
+      "credentials). Read-only — returns written analysis, does not modify "
+      "files. Put any relevant code/errors in 'context'. Use for hard bugs, "
+      "design/architecture decisions, and reviews beyond the local model.",
+      nlohmann::json::parse(
+          R"JSON({"type":"object","properties":{"question":{"type":"string","description":"The question or problem to ask Claude"},"context":{"type":"string","description":"Optional supporting context: code, error logs, file excerpts"},"model":{"type":"string","enum":["opus","sonnet","haiku"],"description":"Advisor model (default opus = Opus 4.8)"},"timeout":{"type":"integer","description":"Max seconds to wait (default 300)"}},"required":["question"]})JSON"),
+      [this](const nlohmann::json& p) { return claude_advisor_tool(p); });
+
   logger_->info("Registered {} built-in tools", tools_.size());
 }
 
@@ -236,10 +249,12 @@ void ToolRegistry::RegisterBuiltinTools() {
 // ---------------------------------------------------------------------------
 
 void ToolRegistry::RegisterChainTool() {
-  tools_["chain"] = [this](const nlohmann::json& params) -> std::string {
+  auto chain_handler = [this](const nlohmann::json& params) -> std::string {
     auto chain_def = ToolChainExecutor::ParseChain(params);
     ToolExecutorFn executor = [this](const std::string& name,
                                      const nlohmann::json& args) {
+      // Re-enters ExecuteTool once per step — see the registry_mu_ note in the
+      // header for why no lock may be held across a handler call.
       return ExecuteTool(name, args);
     };
     ToolChainExecutor chain_executor(executor, logger_);
@@ -269,15 +284,14 @@ void ToolRegistry::RegisterChainTool() {
       {"max_retries", {{"type", "integer"}}}};
   chain_params["required"] = {"steps"};
 
-  tool_schemas_.erase(
-      std::remove_if(tool_schemas_.begin(), tool_schemas_.end(),
-                     [](const ToolSchema& s) { return s.name == "chain"; }),
-      tool_schemas_.end());
-  tool_schemas_.push_back({"chain",
-                           "Execute a pipeline of tools in sequence. Each step "
-                           "can reference previous results via "
-                           "{{prev.result}} or {{steps[N].result}} templates.",
-                           chain_params.dump()});
+  // Route through register_tool rather than touching tools_/tool_schemas_
+  // directly: it is the single place that takes registry_mu_ for a write, and
+  // it already handles de-duplicating the schema on re-registration.
+  register_tool("chain",
+                "Execute a pipeline of tools in sequence. Each step "
+                "can reference previous results via "
+                "{{prev.result}} or {{steps[N].result}} templates.",
+                std::move(chain_params), std::move(chain_handler));
 
   logger_->info("Registered chain tool");
 }
@@ -952,13 +966,13 @@ void ToolRegistry::RegisterExternalTool(
     const std::string& name, const std::string& description,
     const nlohmann::json& parameters,
     std::function<std::string(const nlohmann::json&)> executor) {
-  tools_[name] = std::move(executor);
-  tool_schemas_.erase(
-      std::remove_if(tool_schemas_.begin(), tool_schemas_.end(),
-                     [&name](const ToolSchema& s) { return s.name == name; }),
-      tool_schemas_.end());
-  tool_schemas_.push_back({name, description, parameters.dump()});
-  external_tools_.insert(name);
+  // This is the runtime writer: MCP servers call it on every (re)connect while
+  // agent threads are concurrently reading the registry.
+  register_tool(name, description, parameters, std::move(executor));
+  {
+    std::unique_lock lock(registry_mu_);
+    external_tools_.insert(name);
+  }
   logger_->info("Registered external tool: {}", name);
 }
 
@@ -966,10 +980,11 @@ void ToolRegistry::RegisterExternalTool(
 // Permission checks / ExecuteTool / GetToolSchemas / HasTool
 // ---------------------------------------------------------------------------
 
-bool ToolRegistry::check_permission(const std::string& tool_name) const {
+bool ToolRegistry::permission_allows(const std::string& tool_name,
+                                     bool is_external) const {
   if (!permission_checker_)
     return true;
-  if (external_tools_.count(tool_name) && mcp_tool_manager_) {
+  if (is_external && mcp_tool_manager_) {
     return permission_checker_->IsMcpToolAllowed(
         mcp_tool_manager_->GetServerName(tool_name),
         mcp_tool_manager_->GetOriginalToolName(tool_name));
@@ -977,11 +992,33 @@ bool ToolRegistry::check_permission(const std::string& tool_name) const {
   return permission_checker_->IsAllowed(tool_name);
 }
 
+bool ToolRegistry::check_permission(const std::string& tool_name) const {
+  bool is_external;
+  {
+    std::shared_lock lock(registry_mu_);
+    is_external = external_tools_.count(tool_name) > 0;
+  }
+  return permission_allows(tool_name, is_external);
+}
+
 std::string ToolRegistry::ExecuteTool(const std::string& tool_name,
                                       const nlohmann::json& parameters) {
-  if (!HasTool(tool_name))
-    throw std::runtime_error("Tool not found: " + tool_name);
-  if (!check_permission(tool_name))
+  // Resolve everything the registry owns in one shared-lock section, then run
+  // the handler with the lock released. Copying the std::function out matters
+  // for more than deadlock avoidance: a reference into tools_ would dangle if
+  // an MCP reconnect re-registered the tool mid-call.
+  std::function<std::string(const nlohmann::json&)> handler;
+  bool is_external = false;
+  {
+    std::shared_lock lock(registry_mu_);
+    auto it = tools_.find(tool_name);
+    if (it == tools_.end())
+      throw std::runtime_error("Tool not found: " + tool_name);
+    handler = it->second;
+    is_external = external_tools_.count(tool_name) > 0;
+  }
+
+  if (!permission_allows(tool_name, is_external))
     throw std::runtime_error("Permission denied: tool '" + tool_name +
                              "' is not allowed");
   // Scope enforcement gate — validates targets before execution.
@@ -994,7 +1031,8 @@ std::string ToolRegistry::ExecuteTool(const std::string& tool_name,
     }
   }
 
-  if (should_request_mutation_approval(tool_name, parameters)) {
+  if (approval_manager_ && tool_name != "exec" && tool_name != "bash" &&
+      is_mutating_impl(tool_name, parameters, is_external)) {
     auto decision =
         approval_manager_->RequestApproval(approval_summary(tool_name, parameters));
     if (decision == ApprovalDecision::kDenied) {
@@ -1006,7 +1044,7 @@ std::string ToolRegistry::ExecuteTool(const std::string& tool_name,
   }
   logger_->debug("Executing tool: {} params: {}", tool_name, parameters.dump());
   try {
-    auto result = tools_[tool_name](parameters);
+    auto result = handler(parameters);
     logger_->debug("Tool {} succeeded", tool_name);
     return result;
   } catch (const std::exception& e) {
@@ -1016,9 +1054,11 @@ std::string ToolRegistry::ExecuteTool(const std::string& tool_name,
 }
 
 std::vector<ToolRegistry::ToolSchema> ToolRegistry::GetToolSchemas() const {
+  std::shared_lock lock(registry_mu_);
   if (!permission_checker_)
     return tool_schemas_;
   std::vector<ToolSchema> filtered;
+  filtered.reserve(tool_schemas_.size());
   for (const auto& schema : tool_schemas_) {
     if (external_tools_.count(schema.name) && mcp_tool_manager_) {
       if (permission_checker_->IsMcpToolAllowed(
@@ -1034,6 +1074,7 @@ std::vector<ToolRegistry::ToolSchema> ToolRegistry::GetToolSchemas() const {
 }
 
 bool ToolRegistry::HasTool(const std::string& tool_name) const {
+  std::shared_lock lock(registry_mu_);
   return tools_.find(tool_name) != tools_.end();
 }
 
@@ -1082,6 +1123,17 @@ std::string ToolRegistry::approval_summary(const std::string& tool_name,
 
 bool ToolRegistry::IsMutatingToolCall(const std::string& tool_name,
                                       const nlohmann::json& parameters) const {
+  bool is_external;
+  {
+    std::shared_lock lock(registry_mu_);
+    is_external = external_tools_.count(tool_name) > 0;
+  }
+  return is_mutating_impl(tool_name, parameters, is_external);
+}
+
+bool ToolRegistry::is_mutating_impl(const std::string& tool_name,
+                                    const nlohmann::json& parameters,
+                                    bool is_external) {
   if (tool_name == "write" || tool_name == "edit" ||
       tool_name == "apply_patch" || tool_name == "exec" ||
       tool_name == "bash") {
@@ -1092,7 +1144,7 @@ bool ToolRegistry::IsMutatingToolCall(const std::string& tool_name,
     return looks_like_mutating_action(parameters);
   }
 
-  if (external_tools_.count(tool_name)) {
+  if (is_external) {
     if (looks_like_network_write(parameters) ||
         looks_like_mutating_action(parameters)) {
       return true;
@@ -1113,17 +1165,6 @@ bool ToolRegistry::IsMutatingToolCall(const std::string& tool_name,
   }
 
   return false;
-}
-
-bool ToolRegistry::should_request_mutation_approval(
-    const std::string& tool_name, const nlohmann::json& params) const {
-  if (!approval_manager_) {
-    return false;
-  }
-  if (tool_name == "exec" || tool_name == "bash") {
-    return false;
-  }
-  return IsMutatingToolCall(tool_name, params);
 }
 
 // ---------------------------------------------------------------------------
@@ -1257,6 +1298,88 @@ std::string ToolRegistry::exec_tool(const nlohmann::json& params) {
     throw std::runtime_error("Command timeout: " + command);
   if (result.exit_code != 0)
     throw std::runtime_error("Command exited " +
+                             std::to_string(result.exit_code) + ": " +
+                             result.output);
+  return result.output;
+}
+
+// ---------------------------------------------------------------------------
+// claude_advisor_tool — consult Claude via the official Claude Code CLI.
+//
+// Compliance: this shells out to the user's installed `claude` binary in
+// headless mode (`-p`).  Claude Code authenticates with its own login;
+// QuantClaw never reads, stores, or forwards any credential.  The (arbitrary)
+// prompt is delivered via stdin, never interpolated into the shell, and the
+// run is tool-less so it can only return written advice.
+// ---------------------------------------------------------------------------
+
+static std::string resolve_claude_bin() {
+  if (const char* env = std::getenv("QUANTCLAW_CLAUDE_BIN"); env && *env)
+    return env;
+  if (const char* home = std::getenv("HOME"); home && *home) {
+    fs::path p = fs::path(home) / ".local" / "bin" / "claude";
+    std::error_code ec;
+    if (fs::exists(p, ec))
+      return p.string();
+  }
+  return "claude";
+}
+
+std::string ToolRegistry::claude_advisor_tool(const nlohmann::json& params) {
+  if (!params.contains("question"))
+    throw std::runtime_error("Missing required parameter: question");
+  std::string question = params["question"].get<std::string>();
+  std::string context = params.value("context", "");
+  std::string model = params.value("model", "opus");
+  int timeout = params.value("timeout", 300);
+
+  // Whitelist the model so a bogus value can't reach the CLI (it is also
+  // shell-quoted below — belt and suspenders).
+  if (model != "opus" && model != "sonnet" && model != "haiku")
+    throw std::runtime_error("Unsupported advisor model: " + model +
+                             " (use opus, sonnet, or haiku)");
+
+  std::string prompt = question;
+  if (!context.empty())
+    prompt += "\n\n--- Context ---\n" + context;
+
+  // Write the prompt to a temp file so it reaches the CLI via stdin and is
+  // never parsed by the shell.
+  fs::path tmp = fs::path(workspace_path_) / ".claude_advisor_prompt.txt";
+  {
+    std::ofstream ofs(tmp, std::ios::binary | std::ios::trunc);
+    if (!ofs)
+      throw std::runtime_error("claude_advisor: cannot write prompt file");
+    ofs << prompt;
+  }
+
+  static constexpr const char* kSystem =
+      "You are a senior software engineer acting as an on-demand advisor to an "
+      "autonomous coding agent. Give precise, actionable guidance: likely root "
+      "cause, concrete steps, and code where it helps. Be concise and direct. "
+      "You are read-only; do not attempt to modify files or run commands.";
+
+  std::string bin = resolve_claude_bin();
+  std::string cmd = shell_quote(bin) + " -p --model " + shell_quote(model) +
+                    " --output-format text --allowedTools '' "
+                    "--append-system-prompt " +
+                    shell_quote(kSystem) + " < " + shell_quote(tmp.string());
+
+  logger_->info("claude_advisor: consulting {} (model {})", bin, model);
+  auto result = platform::exec_capture(cmd, timeout, workspace_path_);
+
+  std::error_code ec;
+  fs::remove(tmp, ec);
+
+  if (result.exit_code == -1)
+    throw std::runtime_error(
+        "claude_advisor: failed to launch '" + bin +
+        "' (is the Claude Code CLI installed and reachable?)");
+  if (result.exit_code == -2)
+    throw std::runtime_error("claude_advisor: timed out after " +
+                             std::to_string(timeout) + "s");
+  if (result.exit_code != 0)
+    throw std::runtime_error("claude_advisor: CLI exited " +
                              std::to_string(result.exit_code) + ": " +
                              result.output);
   return result.output;

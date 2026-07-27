@@ -623,6 +623,7 @@ if(BUILD_TESTS)
         tests/test_anthropic_provider.cpp
         tests/test_llama_provider.cpp
         tests/test_security_sandbox.cpp
+        tests/test_concurrency.cpp
         tests/test_tool_registry.cpp
         tests/test_tool_chain.cpp
         tests/test_tool_permissions.cpp

@@ -366,20 +366,25 @@ void GatewayServer::handle_rpc_request(const std::string& conn_id,
     return;
   }
 
-  ClientConnection* client = nullptr;
+  // Snapshot the connection by value. A pointer into connections_ must not
+  // outlive the lock: the Close handler erases the entry from another thread
+  // (and any insert can rehash), so a client that fires a request and
+  // immediately disconnects would leave this thread dereferencing freed
+  // storage — for the whole duration of an agent turn, in the handler call
+  // below. handle_hello() also mutates the entry concurrently.
+  // ClientConnection is a few strings and a vector; copying it is cheap next
+  // to the RPC it guards.
+  ClientConnection client;
   {
     std::lock_guard<std::mutex> lock(connections_mutex_);
     auto it = connections_.find(conn_id);
-    if (it != connections_.end()) {
-      client = &it->second;
+    if (it == connections_.end()) {
+      auto resp = RpcResponse::failure(request.id, "Connection not found",
+                                       "CONNECTION_NOT_FOUND");
+      ws.send(resp.ToJson().dump());
+      return;
     }
-  }
-
-  if (!client) {
-    auto resp = RpcResponse::failure(request.id, "Connection not found",
-                                     "CONNECTION_NOT_FOUND");
-    ws.send(resp.ToJson().dump());
-    return;
+    client = it->second;
   }
 
   // Enforce authentication: if auth mode is not "none", client must have sent
@@ -389,7 +394,7 @@ void GatewayServer::handle_rpc_request(const std::string& conn_id,
     std::lock_guard<std::mutex> lock(auth_mutex_);
     current_auth_mode = auth_mode_;
   }
-  if (current_auth_mode != "none" && !client->authenticated) {
+  if (current_auth_mode != "none" && !client.authenticated) {
     auto resp = RpcResponse::failure(
         request.id, "Not authenticated: send connect.hello first",
         "NOT_AUTHENTICATED");
@@ -398,11 +403,10 @@ void GatewayServer::handle_rpc_request(const std::string& conn_id,
   }
 
   // RBAC check
-  if (rbac_checker_ && client->authenticated) {
-    if (!rbac_checker_->IsAllowed(request.method, client->role,
-                                  client->scopes)) {
+  if (rbac_checker_ && client.authenticated) {
+    if (!rbac_checker_->IsAllowed(request.method, client.role, client.scopes)) {
       logger_->warn("RBAC denied: method={}, role={}, conn={}", request.method,
-                    client->role, conn_id);
+                    client.role, conn_id);
       auto resp = RpcResponse::failure(
           request.id,
           "Permission denied: insufficient scope for " + request.method,
@@ -440,7 +444,7 @@ void GatewayServer::handle_rpc_request(const std::string& conn_id,
     std::string req_id = request.id;
     std::string req_method = request.method;
     nlohmann::json req_params = request.params;
-    ClientConnection client_copy = *client;
+    ClientConnection client_copy = client;
     auto done_flag = std::make_shared<std::atomic<bool>>(false);
     std::thread t([this, req_id, req_method, req_params,
                    client_copy = std::move(client_copy), handler,
@@ -477,7 +481,7 @@ void GatewayServer::handle_rpc_request(const std::string& conn_id,
   }
 
   try {
-    auto result = handler(request.params, *client);
+    auto result = handler(request.params, client);
     auto resp = RpcResponse::success(request.id, result);
     ws.send(resp.ToJson().dump());
   } catch (const std::exception& e) {

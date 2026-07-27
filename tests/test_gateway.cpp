@@ -88,7 +88,7 @@ TEST_F(GatewayTest, RegisterHandler) {
   bool called = false;
   server_->RegisterHandler(
       "test.method",
-      [&called](const nlohmann::json&, ClientConnection&) -> nlohmann::json {
+      [&called](const nlohmann::json&, const ClientConnection&) -> nlohmann::json {
         called = true;
         return {{"result", "ok"}};
       });
@@ -105,7 +105,7 @@ TEST_F(GatewayTest, ClientConnectAndCall) {
 
   server_->RegisterHandler(
       "test.echo",
-      [](const nlohmann::json& params, ClientConnection&) -> nlohmann::json {
+      [](const nlohmann::json& params, const ClientConnection&) -> nlohmann::json {
         return {{"echo", params.value("msg", "")}};
       });
 
@@ -134,7 +134,7 @@ TEST_F(GatewayTest, HealthRpc) {
 
   server_->RegisterHandler(
       methods::kGatewayHealth,
-      [](const nlohmann::json&, ClientConnection&) -> nlohmann::json {
+      [](const nlohmann::json&, const ClientConnection&) -> nlohmann::json {
         return {{"status", "ok"}, {"version", "0.2.0"}};
       });
 
@@ -179,7 +179,7 @@ TEST_F(GatewayTest, MultipleClients) {
 
   server_->RegisterHandler(
       "test.ping",
-      [](const nlohmann::json&, ClientConnection&) -> nlohmann::json {
+      [](const nlohmann::json&, const ClientConnection&) -> nlohmann::json {
         return {{"pong", true}};
       });
 
@@ -258,7 +258,7 @@ TEST_F(GatewayTest, AuthModeNoneAllowsAll) {
 
   server_->RegisterHandler(
       "test.ping",
-      [](const nlohmann::json&, ClientConnection&) -> nlohmann::json {
+      [](const nlohmann::json&, const ClientConnection&) -> nlohmann::json {
         return {{"pong", true}};
       });
 
@@ -284,7 +284,7 @@ TEST_F(GatewayTest, AuthTokenValidationSuccess) {
 
   server_->RegisterHandler(
       "test.ping",
-      [](const nlohmann::json&, ClientConnection&) -> nlohmann::json {
+      [](const nlohmann::json&, const ClientConnection&) -> nlohmann::json {
         return {{"pong", true}};
       });
 
@@ -311,7 +311,7 @@ TEST_F(GatewayTest, AuthTokenValidationFailure) {
 
   server_->RegisterHandler(
       "test.ping",
-      [](const nlohmann::json&, ClientConnection&) -> nlohmann::json {
+      [](const nlohmann::json&, const ClientConnection&) -> nlohmann::json {
         return {{"pong", true}};
       });
 
@@ -473,7 +473,7 @@ TEST_F(GatewayTest, SendToDisconnectedClient) {
 
   server_->RegisterHandler(
       "test.capture_id",
-      [&](const nlohmann::json&, ClientConnection& conn) -> nlohmann::json {
+      [&](const nlohmann::json&, const ClientConnection& conn) -> nlohmann::json {
         std::lock_guard<std::mutex> lk(id_mu);
         captured_conn_id = conn.connection_id;
         return {{"ok", true}};
