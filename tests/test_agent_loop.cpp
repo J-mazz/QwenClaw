@@ -6,6 +6,7 @@
 #include <gtest/gtest.h>
 
 import std;
+import nlohmann.json;
 import quantclaw.config;
 import quantclaw.core.agent_loop;
 import quantclaw.core.memory_manager;
@@ -311,4 +312,194 @@ TEST_F(AgentLoopUsageKeyTest, StreamUsageFallsBackToSessionKey) {
 
   EXPECT_EQ(accumulator_->GetSession("internal-session").turns, 1);
   EXPECT_EQ(accumulator_->GetSession("custom-key").turns, 0);
+}
+
+// ── Tool-calling turns ───────────────────────────────────────────────────────
+//
+// Nothing previously exercised a tool-calling turn: the mock only ever emitted
+// plain text, so the streaming tool path — which executed tools inside the SSE
+// callback and double-counted iterations — was entirely uncovered.
+
+namespace {
+
+// Emits a tool call on every stream until `tool_turns` have happened, then a
+// final text response. Records how many times the provider was invoked and
+// whether a stream was open at the moment each tool ran.
+class ToolCallingProvider : public quantclaw::LLMProvider {
+ public:
+  int tool_turns = 1;
+  std::string final_text = "All done.";
+  int tool_calls_per_turn = 1;
+
+  std::atomic<int> stream_invocations{0};
+  std::atomic<int> completion_invocations{0};
+  std::atomic<bool> stream_open{false};
+
+  quantclaw::ChatCompletionResponse
+  ChatCompletion(const quantclaw::ChatCompletionRequest&) override {
+    int n = completion_invocations.fetch_add(1);
+    quantclaw::ChatCompletionResponse resp;
+    if (n < tool_turns) {
+      for (int i = 0; i < tool_calls_per_turn; ++i) {
+        quantclaw::ToolCall tc;
+        tc.id = "call_" + std::to_string(n) + "_" + std::to_string(i);
+        tc.name = "probe";
+        tc.arguments = {{"i", i}};
+        resp.tool_calls.push_back(tc);
+      }
+      resp.finish_reason = "tool_calls";
+    } else {
+      resp.content = final_text;
+      resp.finish_reason = "stop";
+    }
+    return resp;
+  }
+
+  void ChatCompletionStream(
+      const quantclaw::ChatCompletionRequest&,
+      std::function<void(const quantclaw::ChatCompletionResponse&)> callback)
+      override {
+    int n = stream_invocations.fetch_add(1);
+    stream_open.store(true);
+    if (n < tool_turns) {
+      quantclaw::ChatCompletionResponse chunk;
+      for (int i = 0; i < tool_calls_per_turn; ++i) {
+        quantclaw::ToolCall tc;
+        tc.id = "call_" + std::to_string(n) + "_" + std::to_string(i);
+        tc.name = "probe";
+        tc.arguments = {{"i", i}};
+        chunk.tool_calls.push_back(tc);
+      }
+      callback(chunk);
+    } else {
+      quantclaw::ChatCompletionResponse chunk;
+      chunk.content = final_text;
+      callback(chunk);
+      quantclaw::ChatCompletionResponse end;
+      end.is_stream_end = true;
+      callback(end);
+    }
+    stream_open.store(false);
+  }
+
+  std::string GetProviderName() const override { return "toolmock"; }
+  std::vector<std::string> GetSupportedModels() const override {
+    return {"toolmock"};
+  }
+};
+
+class AgentLoopToolTest : public AgentLoopTest {
+ protected:
+  void SetUp() override {
+    AgentLoopTest::SetUp();
+    tool_provider_ = std::make_shared<ToolCallingProvider>();
+
+    quantclaw::AgentConfig cfg;
+    cfg.model = "toolmock";
+    cfg.max_iterations = 3;
+    cfg.auto_attach_tools = true;
+
+    agent_loop_ = std::make_unique<quantclaw::AgentLoop>(
+        memory_manager_, skill_loader_, tool_registry_, tool_provider_, cfg,
+        logger_);
+
+    tool_registry_->RegisterExternalTool(
+        "probe", "records invocation", nlohmann::json{{"type", "object"}},
+        [this](const nlohmann::json&) -> std::string {
+          tool_ran_during_stream_ =
+              tool_ran_during_stream_ || tool_provider_->stream_open.load();
+          ++tool_invocations_;
+          return "probe-result";
+        });
+  }
+
+  std::shared_ptr<ToolCallingProvider> tool_provider_;
+  int tool_invocations_ = 0;
+  bool tool_ran_during_stream_ = false;
+};
+
+}  // namespace
+
+// The headline regression: a tool-using streaming turn used to increment the
+// iteration counter once inside the stream callback (per chunk) AND again
+// after the stream, so every such turn cost at least two of the budget.
+// With max_iterations = 3 and a provider that only ever asks for tools, a
+// correct loop calls the provider exactly 3 times; the double-count gives 2.
+TEST_F(AgentLoopToolTest, StreamingToolTurnCostsExactlyOneIteration) {
+  tool_provider_->tool_turns = 100;  // never finishes on its own
+
+  (void)agent_loop_->ProcessMessageStream("go", {}, "sys", nullptr);
+
+  EXPECT_EQ(tool_provider_->stream_invocations.load(), 3)
+      << "each model turn must consume exactly one iteration";
+}
+
+TEST_F(AgentLoopToolTest, NonStreamingToolTurnCostsExactlyOneIteration) {
+  tool_provider_->tool_turns = 100;
+  try {
+    (void)agent_loop_->ProcessMessage("go", {}, "sys");
+  } catch (const std::exception&) {
+    // Exhausting iterations throws on the non-streaming path; the count is
+    // what we are asserting.
+  }
+  EXPECT_EQ(tool_provider_->completion_invocations.load(), 3);
+}
+
+// Tools used to run inside the SSE parse callback, with the HTTP response
+// still open: a slow tool stalled the provider's read loop for its duration.
+TEST_F(AgentLoopToolTest, ToolsRunAfterTheStreamCloses) {
+  tool_provider_->tool_turns = 1;
+
+  auto msgs = agent_loop_->ProcessMessageStream("go", {}, "sys", nullptr);
+
+  EXPECT_GT(tool_invocations_, 0);
+  EXPECT_FALSE(tool_ran_during_stream_)
+      << "tool executed while the stream was still open";
+  ASSERT_FALSE(msgs.empty());
+  EXPECT_EQ(msgs.back().content[0].text, "All done.");
+}
+
+// One assistant message holding every tool_use block, then one user message
+// holding every tool_result — the shape the message APIs expect. The old
+// streaming path emitted a separate assistant/user pair per tool call and
+// attached the assistant text only to the first.
+TEST_F(AgentLoopToolTest, MultipleToolCallsProduceOneAssistantAndOneResultMessage) {
+  tool_provider_->tool_turns = 1;
+  tool_provider_->tool_calls_per_turn = 3;
+
+  auto msgs = agent_loop_->ProcessMessageStream("go", {}, "sys", nullptr);
+
+  ASSERT_GE(msgs.size(), 3u);
+  const auto& assistant = msgs[0];
+  const auto& results = msgs[1];
+
+  EXPECT_EQ(assistant.role, "assistant");
+  int tool_uses = 0;
+  for (const auto& b : assistant.content) {
+    if (b.type == "tool_use") ++tool_uses;
+  }
+  EXPECT_EQ(tool_uses, 3) << "all tool_use blocks belong to one message";
+
+  EXPECT_EQ(results.role, "user");
+  int tool_results = 0;
+  for (const auto& b : results.content) {
+    if (b.type == "tool_result") ++tool_results;
+  }
+  EXPECT_EQ(tool_results, 3) << "all tool_result blocks belong to one message";
+  EXPECT_EQ(tool_invocations_, 3);
+}
+
+TEST_F(AgentLoopToolTest, ToolResultsAreReportedToTheCallback) {
+  tool_provider_->tool_turns = 1;
+
+  std::vector<std::string> event_types;
+  (void)agent_loop_->ProcessMessageStream(
+      "go", {}, "sys", [&](const quantclaw::AgentEvent& e) {
+        event_types.push_back(e.type);
+      });
+
+  EXPECT_NE(std::find(event_types.begin(), event_types.end(), "agent.tool_use"),
+            event_types.end());
+  EXPECT_NE(std::find(event_types.begin(), event_types.end(), "agent.tool_result"),
+            event_types.end());
 }

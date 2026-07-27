@@ -85,6 +85,21 @@ inline constexpr int kToolResultKeepLines = 20;
 /// Overflow compaction: max retry attempts
 inline constexpr int kOverflowCompactionMaxRetries = 3;
 
+/// Retries for transient provider errors (5xx, timeouts, rate limits).
+///
+/// Kept separate from kDefaultMaxIterations on purpose: retries used to be
+/// charged to the reasoning-iteration budget, so a handful of transient 5xx
+/// could consume the whole allowance for a turn and the agent would give up
+/// with iterations left unspent on actual work.
+inline constexpr int kTransientErrorMaxRetries = 4;
+
+/// Base delay for transient-error backoff, doubled per attempt and jittered.
+inline constexpr int kRetryBackoffBaseMs = 500;
+
+/// Ceiling on a single backoff sleep. The old code shifted up to 16s with no
+/// cap in sight and no jitter, so concurrent turns retried in lockstep.
+inline constexpr int kRetryBackoffMaxMs = 15000;
+
 // ------------------------------------------------------------
 // Session compaction defaults
 // ------------------------------------------------------------

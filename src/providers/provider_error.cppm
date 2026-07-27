@@ -21,6 +21,28 @@ enum class ProviderErrorKind {
 
 std::string ProviderErrorKindToString(ProviderErrorKind kind);
 
+// Whether re-issuing the identical request could plausibly succeed.
+//
+// Auth, billing, and model-not-found are settled facts about the account or
+// the request: retrying them only delays the real error behind a series of
+// blocking backoff sleeps. Context overflow is excluded because it has its own
+// recovery path (compact, then retry) rather than a plain re-send.
+constexpr bool IsRetryable(ProviderErrorKind kind) {
+  switch (kind) {
+    case ProviderErrorKind::kRateLimit:
+    case ProviderErrorKind::kTransient:
+    case ProviderErrorKind::kTimeout:
+    case ProviderErrorKind::kUnknown:
+      return true;
+    case ProviderErrorKind::kAuthError:
+    case ProviderErrorKind::kBillingError:
+    case ProviderErrorKind::kModelNotFound:
+    case ProviderErrorKind::kContextOverflow:
+      return false;
+  }
+  return false;
+}
+
 // Exception thrown by LLM providers when an API call fails.
 // Carries the error classification so failover logic can decide
 // whether to retry, cool down, or fall back to another model.

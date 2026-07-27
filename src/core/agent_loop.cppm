@@ -22,6 +22,7 @@ import quantclaw.providers.curl_raii;
 import quantclaw.providers.anthropic_provider;
 import quantclaw.providers.failover_resolver;
 import quantclaw.providers.llm_provider;
+import quantclaw.providers.provider_error;
 import quantclaw.providers.provider_registry;
 import quantclaw.tools.tool_registry;
 
@@ -112,6 +113,31 @@ class AgentLoop : public Noncopyable {
 
   std::vector<std::string>
   handle_tool_calls(const std::vector<nlohmann::json>& tool_calls);
+
+  // Tool definitions in OpenAI function-calling shape, or empty when
+  // agent.autoAttachTools is off. Shared by both turn paths, which previously
+  // carried byte-identical copies of this loop.
+  std::vector<nlohmann::json> build_tool_definitions() const;
+
+  // Context assembly + request construction, shared by both turn paths.
+  ChatCompletionRequest prepare_request(const std::string& message,
+                                        const std::vector<Message>& history,
+                                        const std::string& system_prompt,
+                                        bool stream,
+                                        std::shared_ptr<ContextEngine>& engine,
+                                        int& ctx_window_out,
+                                        DagTurnState* dag_turn);
+
+  // Common provider-error handling for both turn paths. Returns true when the
+  // caller should retry (after compaction or failover), false when the error
+  // is terminal.
+  bool handle_provider_error(const ProviderError& pe, DagTurnState* dag_turn,
+                             ChatCompletionRequest& request,
+                             const std::string& system_prompt,
+                             const std::shared_ptr<ContextEngine>& engine,
+                             const std::string& original_model,
+                             std::shared_ptr<LLMProvider>& provider,
+                             int& overflow_retries, int& transient_retries);
 
   std::shared_ptr<MemoryManager> memory_manager_;
   std::shared_ptr<SkillLoader> skill_loader_;
