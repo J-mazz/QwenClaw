@@ -159,6 +159,8 @@ fi
 
 cd "${ROOT}"
 
+"${SCRIPT_DIR}/setup_llama.sh"
+
 CC="${QC_CC}" CXX="${QC_CXX}" cmake --preset "${PRESET}" \
     -DCMAKE_BUILD_TYPE="${BUILD_TYPE}" \
     -DBUILD_TESTS="${BUILD_TESTS}" \

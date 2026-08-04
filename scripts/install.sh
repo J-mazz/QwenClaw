@@ -135,6 +135,7 @@ build_and_install_from_source() {
   install_deps
   bootstrap_vcpkg
   pick_compiler
+  "${SCRIPT_DIR}/setup_llama.sh"
 
   info "Configuring with preset ${BUILD_PRESET}"
   cd "${ROOT}"

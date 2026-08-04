@@ -58,7 +58,10 @@ Dependencies managed via vcpkg: `spdlog`, `nlohmann-json`, `curl`, `openssl`, `d
 ## Quick start
 
 ```bash
-# Build
+# Fetch pinned llama.cpp latest and apply the TurboQuant compatibility patch
+./scripts/setup_llama.sh
+
+# Build the gateway and CUDA llama-server
 cmake --preset gcc16-ninja
 cmake --build --preset gcc16-ninja -j$(nproc)
 
@@ -152,7 +155,7 @@ src/
 └── platform/       OS abstraction
 sidecar/            Node.js plugin runtime (TypeScript, JITI loader)
 ui/                 Lit web dashboard (Vite, TypeScript)
-ui/llama.cpp/       Embedded llama.cpp (builds llama-server)
+ui/llama.cpp/       Fetched pinned llama.cpp + TurboQuant patch (builds llama-server)
 ```
 
 ## RPC protocol

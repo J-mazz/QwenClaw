@@ -476,6 +476,12 @@ set_property(TARGET quantclaw PROPERTY CXX_SCAN_FOR_MODULES ON)
 # Optional sibling build: QuantClaw speaks to llama-server over HTTP and links
 # nothing from it, so the whole subtree is skippable (see QC_BUILD_LLAMA_SERVER).
 if(QC_BUILD_LLAMA_SERVER)
+    if(NOT EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/ui/llama.cpp/llama.cpp/CMakeLists.txt")
+        message(FATAL_ERROR
+            "The pinned llama.cpp checkout is missing. Run "
+            "${CMAKE_CURRENT_SOURCE_DIR}/scripts/setup_llama.sh before configuring.")
+    endif()
+
     # Resolve the CUDA compiler by *discovery* rather than a pinned absolute
     # path. A pinned path silently rots when the toolkit is upgraded
     # (cuda-13.2 -> cuda-13.3) and bricks the whole build tree, including the
@@ -703,6 +709,5 @@ if(BUILD_TESTS)
         add_dependencies(quantclaw_tests qc_stdlib_modules)
     endif()
 endif()
-
 
 

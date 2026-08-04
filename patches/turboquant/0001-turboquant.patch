@@ -1,10 +1,10 @@
 diff --git a/CMakeLists.txt b/CMakeLists.txt
-index caea48c50..65b54463a 100644
+index 3df1d82..7258c0c 100644
 --- a/CMakeLists.txt
 +++ b/CMakeLists.txt
-@@ -115,6 +115,11 @@ option(LLAMA_TESTS_INSTALL  "llama: install tests"        ON)
- # 3rd party libs
+@@ -127,6 +127,11 @@ option(LLAMA_TESTS_INSTALL "llama: install tests" ON)
  option(LLAMA_OPENSSL    "llama: use openssl to support HTTPS" ON)
+ option(LLAMA_SUBPROCESS "llama-common: use subprocess, required by server tools and server router mode" ${LLAMA_SUBPROCESS_DEFAULT})
  option(LLAMA_LLGUIDANCE "llama-common: include LLGuidance library for structured output in common utils" OFF)
 +option(LLAMA_TURBOQUANT "llama: enable TurboQuant KV cache hooks" ON)
 +
@@ -15,10 +15,10 @@ index caea48c50..65b54463a 100644
  
  # Required for relocatable CMake package
 diff --git a/common/arg.cpp b/common/arg.cpp
-index 2e0f46db5..ed80a6448 100644
+index b75f4f0..0a2fa47 100644
 --- a/common/arg.cpp
 +++ b/common/arg.cpp
-@@ -2135,6 +2135,55 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
+@@ -2513,6 +2513,55 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
              params.n_sequences = value;
          }
      ).set_examples({LLAMA_EXAMPLE_PARALLEL}));
@@ -75,11 +75,11 @@ index 2e0f46db5..ed80a6448 100644
          {"-cb", "--cont-batching"},
          {"-nocb", "--no-cont-batching"},
 diff --git a/common/common.cpp b/common/common.cpp
-index 16f78debd..bbdd38c3a 100644
+index d9ce575..435dcf4 100644
 --- a/common/common.cpp
 +++ b/common/common.cpp
-@@ -7,6 +7,10 @@
- #include "sampling.h"
+@@ -10,6 +10,10 @@
+ #include "speculative.h"
  #include "unicode.h"
  
 +#if defined(LLAMA_TURBOQUANT)
@@ -89,8 +89,8 @@ index 16f78debd..bbdd38c3a 100644
  #include <algorithm>
  #include <cinttypes>
  #include <climits>
-@@ -1142,6 +1146,23 @@ struct common_init_result::impl {
- common_init_result::common_init_result(common_params & params) :
+@@ -1234,6 +1238,23 @@ struct common_init_result::impl {
+ common_init_result::common_init_result(common_params & params, bool model_only) :
      pimpl(new impl{}) {
      auto mparams = common_model_params_to_llama(params);
 +
@@ -113,7 +113,7 @@ index 16f78debd..bbdd38c3a 100644
      auto cparams = common_context_params_to_llama(params);
  
      if (params.fit_params) {
-@@ -1471,6 +1492,12 @@ struct llama_context_params common_context_params_to_llama(const common_params &
+@@ -1669,6 +1690,12 @@ struct llama_context_params common_context_params_to_llama(const common_params &
      cparams.flash_attn_type   = params.flash_attn_type;
      cparams.cb_eval           = params.cb_eval;
      cparams.cb_eval_user_data = params.cb_eval_user_data;
@@ -127,19 +127,19 @@ index 16f78debd..bbdd38c3a 100644
      cparams.no_perf           = params.no_perf;
      cparams.op_offload        = !params.no_op_offload;
 diff --git a/common/common.h b/common/common.h
-index 020b6a721..aa155f075 100644
+index 78d0877..2ee9fbc 100644
 --- a/common/common.h
 +++ b/common/common.h
-@@ -578,6 +578,8 @@ struct common_params {
-     int32_t timeout_write       = timeout_read;  // http write timeout in seconds
+@@ -616,6 +616,8 @@ struct common_params {
+     int32_t sse_ping_interval   = 30;            // SSE ping interval in seconds
      int32_t n_threads_http      = -1;    // number of threads to process HTTP requests (TODO: support threadpool)
      int32_t n_cache_reuse       = 0;     // min chunk size to reuse from the cache via KV shifting
 +    int32_t turboquant_bits_k   = 8;     // TurboQuant bits for K cache entries
 +    int32_t turboquant_bits_v   = 8;     // TurboQuant bits for V cache entries
      bool    cache_prompt        = true;  // whether to enable prompt caching
-     bool    clear_idle          = true;  // save and clear idle slots upon starting a new task
+     bool    cache_idle_slots    = true;  // save and clear idle slots upon starting a new task
      int32_t n_ctx_checkpoints   = 32;    // max number of context checkpoints per slot
-@@ -615,6 +617,13 @@ struct common_params {
+@@ -662,6 +664,13 @@ struct common_params {
      bool endpoint_props   = false; // only control POST requests, not GET
      bool endpoint_metrics = false;
  
@@ -154,11 +154,11 @@ index 020b6a721..aa155f075 100644
      std::vector<std::string> server_tools;
  
 diff --git a/src/CMakeLists.txt b/src/CMakeLists.txt
-index 121c21fed..554d76e44 100644
+index 24f05cc..58354f0 100644
 --- a/src/CMakeLists.txt
 +++ b/src/CMakeLists.txt
-@@ -151,6 +151,13 @@ add_library(llama
-             models/xverse.cpp
+@@ -44,6 +44,13 @@ add_library(llama
+             ${LLAMA_MODELS_SOURCES}
              )
  
 +if (LLAMA_TURBOQUANT)
@@ -172,7 +172,7 @@ index 121c21fed..554d76e44 100644
      VERSION ${LLAMA_INSTALL_VERSION}
      SOVERSION 0
 diff --git a/src/llama-kv-cache.cpp b/src/llama-kv-cache.cpp
-index 3e0fd3107..40d2fc7b5 100644
+index 8678a32..d7e03df 100644
 --- a/src/llama-kv-cache.cpp
 +++ b/src/llama-kv-cache.cpp
 @@ -5,6 +5,10 @@
@@ -186,7 +186,7 @@ index 3e0fd3107..40d2fc7b5 100644
  #include <algorithm>
  #include <cassert>
  #include <cmath>
-@@ -1141,12 +1145,18 @@ ggml_tensor * llama_kv_cache::get_k(ggml_context * ctx, int32_t il, uint32_t n_k
+@@ -1258,12 +1262,18 @@ ggml_tensor * llama_kv_cache::get_k(ggml_context * ctx, int32_t il, uint32_t n_k
  
      const uint32_t ns = sinfo.s1 - sinfo.s0 + 1;
  
@@ -206,7 +206,7 @@ index 3e0fd3107..40d2fc7b5 100644
  }
  
  ggml_tensor * llama_kv_cache::get_v(ggml_context * ctx, int32_t il, uint32_t n_kv, const slot_info & sinfo) const {
-@@ -1164,21 +1174,33 @@ ggml_tensor * llama_kv_cache::get_v(ggml_context * ctx, int32_t il, uint32_t n_k
+@@ -1281,21 +1291,33 @@ ggml_tensor * llama_kv_cache::get_v(ggml_context * ctx, int32_t il, uint32_t n_k
  
      if (!v_trans) {
          // note: v->nb[1] <= v->nb[2]
@@ -242,7 +242,7 @@ index 3e0fd3107..40d2fc7b5 100644
  }
  
  ggml_tensor * llama_kv_cache::cpy_k(ggml_context * ctx, ggml_tensor * k_cur, ggml_tensor * k_idxs, int32_t il, const slot_info & sinfo) const {
-@@ -1212,6 +1234,10 @@ ggml_tensor * llama_kv_cache::cpy_k(ggml_context * ctx, ggml_tensor * k_cur, ggm
+@@ -1329,6 +1351,10 @@ ggml_tensor * llama_kv_cache::cpy_k(ggml_context * ctx, ggml_tensor * k_cur, ggm
          k = ggml_reshape_2d(ctx, k, n_embd_gqa, kv_size*n_stream);
      }
  
@@ -253,7 +253,7 @@ index 3e0fd3107..40d2fc7b5 100644
      // store the current K values into the cache
      return ggml_set_rows(ctx, k, k_cur, k_idxs);
  }
-@@ -1229,6 +1255,10 @@ ggml_tensor * llama_kv_cache::cpy_v(ggml_context * ctx, ggml_tensor * v_cur, ggm
+@@ -1346,6 +1372,10 @@ ggml_tensor * llama_kv_cache::cpy_v(ggml_context * ctx, ggml_tensor * v_cur, ggm
  
      const int64_t n_embd_gqa = n_embd_head*n_head;
  
@@ -266,7 +266,7 @@ index 3e0fd3107..40d2fc7b5 100644
  
 diff --git a/src/turboquant.cpp b/src/turboquant.cpp
 new file mode 100644
-index 000000000..a3c1a7344
+index 0000000..a3c1a73
 --- /dev/null
 +++ b/src/turboquant.cpp
 @@ -0,0 +1,584 @@
@@ -856,7 +856,7 @@ index 000000000..a3c1a7344
 +}
 diff --git a/src/turboquant.h b/src/turboquant.h
 new file mode 100644
-index 000000000..79bc2ed97
+index 0000000..79bc2ed
 --- /dev/null
 +++ b/src/turboquant.h
 @@ -0,0 +1,80 @@
@@ -941,28 +941,28 @@ index 000000000..79bc2ed97
 +ggml_backend_sched_eval_callback llama_turboquant_calibrate_cb_eval();
 +void *                            llama_turboquant_calibrate_cb_user_data();
 diff --git a/tools/server/server.cpp b/tools/server/server.cpp
-index a7afa7743..a3d945707 100644
+index aafb1f3..d8c9b81 100644
 --- a/tools/server/server.cpp
 +++ b/tools/server/server.cpp
-@@ -90,6 +90,21 @@ int main(int argc, char ** argv) {
-         params.n_batch = params.n_ubatch;
-     }
+@@ -148,6 +148,21 @@ int llama_server(common_params & params, int argc, char ** argv) {
+             params.n_batch = params.n_ubatch;
+         }
  
 +#if defined(LLAMA_TURBOQUANT)
-+    if (!params.turboquant_sidecar.empty() && params.n_parallel != 1) {
-+        LOG_ERR("%s: --turboquant requires --parallel 1 (got %d)\n", __func__, params.n_parallel);
-+        return 1;
-+    }
++        if (!params.turboquant_sidecar.empty() && params.n_parallel != 1) {
++            LOG_ERR("%s: --turboquant requires --parallel 1 (got %d)\n", __func__, params.n_parallel);
++            return 1;
++        }
 +
-+    if (!params.turboquant_sidecar.empty()) {
-+        LOG_INF("%s: TurboQuant enabled (sidecar=%s, bits_k=%d, bits_v=%d)\n",
-+                __func__,
-+                params.turboquant_sidecar.c_str(),
-+                params.turboquant_bits_k,
-+                params.turboquant_bits_v);
-+    }
++        if (!params.turboquant_sidecar.empty()) {
++            LOG_INF("%s: TurboQuant enabled (sidecar=%s, bits_k=%d, bits_v=%d)\n",
++                    __func__,
++                    params.turboquant_sidecar.c_str(),
++                    params.turboquant_bits_k,
++                    params.turboquant_bits_v);
++        }
 +#endif
 +
-     if (params.n_parallel < 0) {
-         LOG_INF("%s: n_parallel is set to auto, using n_parallel = 4 and kv_unified = true\n", __func__);
+         if (params.n_parallel < 0) {
+             SRV_TRC("%s", "n_parallel is set to auto, using n_parallel = 4 and kv_unified = true\n");
  

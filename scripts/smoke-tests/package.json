@@ -1,6 +1,6 @@
 {
   "private": true,
   "dependencies": {
-    "ws": "^8.19.0"
+    "ws": "^8.21.2"
   }
 }
